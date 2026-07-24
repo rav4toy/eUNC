@@ -1,22 +1,12 @@
 -- ==========================================================
 -- External Luau VM Capability Lab v4.0
 --
--- This is a behavior-first compatibility benchmark inspired by sUNC's
--- result model. It measures what the running VM actually supports; no
--- executor's documentation is treated as the definition of support.
--- It is independent from sUNC and does not generate an official,
--- server-verified sUNC score.
 --
 -- Outcomes are kept distinct:
 --   PASS    = the capability exists and the tested behavior worked
 --   FAIL    = it exists, but its behavior or return contract was wrong
 --   MISSING = no canonical name or accepted alias was found
---   SKIP    = a live fixture or an intentionally disabled test is needed
---
--- Severe-specific APIs are retained as supplemental extension tests.
--- The broad function inventory also remains counted, including
--- undocumented names, while aliases are grouped for behavioral tests.
--- Every active switch is enabled except live WebSocket execution.
+--   SKIP    = a live fixture or an intentionally disabled test is needed.
 -- ==========================================================
 
 local PASS = "[PASS]"
@@ -26,7 +16,8 @@ local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
 local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
-local SUITE_VERSION = "v4.0-behavior-first"
+local SUITE_VERSION = "v4.1-behavior-first"
+local FAILURE_INDEX_YIELD_INTERVAL = 20
 local NATIVE_WARN = warn
 
 local function emit_warn(message)
@@ -40,10 +31,8 @@ end
 print(INFO .. " External Luau VM Capability Lab: " .. SUITE_VERSION)
 
 -- ============================================================
--- EXHAUSTIVE TEST CONFIGURATION
+--                     TEST CONFIGURATION
 -- ============================================================
---
--- Everything below is deliberately enabled except WebSocket.
 --
 local EXTERNAL_TEST_CONFIG = {
     run_notifications = true,
@@ -70,7 +59,7 @@ local EXTERNAL_TEST_CONFIG = {
     run_memory_changed = true
 }
 
--- Change these only when enabling the matching tests.
+
 local EXTERNAL_TEST_VALUES = {
     http_get_url = "https://example.com/",
     http_post_url = "https://httpbin.org/post",
@@ -79,8 +68,6 @@ local EXTERNAL_TEST_VALUES = {
     http_post_accept = "application/json",
 
     -- Keep local_websocket_echo_server.py running before executing
-    -- this suite. Severe's WebsocketClient.new blocks until the
-    -- global 15-second scheduler timeout when the target is offline.
     websocket_url = "ws://127.0.0.1:8765",
 
     -- A valid address belonging to a disposable test allocation or
@@ -92,7 +79,7 @@ local EXTERNAL_TEST_VALUES = {
     memory_write_address = nil,
 
     -- Optional specialized addresses. Configure only disposable,
-    -- correctly typed allocations owned by your own test setup.
+    -- correctly typed allocations
     memory_string_address = nil,
     memory_vector_address = nil,
     memory_changed_address = nil,
@@ -537,7 +524,7 @@ local function capability_test(category, label, candidates, callback)
     return record_result(
         label,
         "PASS",
-        detail or ("resolved via " .. resolved_path),
+        "resolved via " .. resolved_path,
         "compatibility"
     )
 end
@@ -7364,7 +7351,7 @@ do
 
             write_file(fs_file, "isfile")
             return fn(fs_file) == true
-                and fn(fs_folder .. "/missing.file") == false,
+                and fn(fs_folder .. "/missing.txt") == false,
                 "existing/missing distinction failed"
         end
     )
@@ -7717,13 +7704,26 @@ do
         "Cryptography",
         "crypt.hash is deterministic and input-sensitive",
         {
+            {
+                "crypt.hash.sha256",
+                first_present(
+                    first_present(crypt, "hash"),
+                    "sha256"
+                )
+            },
+            {"crypt.sha256", first_present(crypt, "sha256")},
             {"crypt.hash", first_present(crypt, "hash")},
             {"syn.crypt.hash", first_present(syn_crypt, "hash")},
             {"crypto.hash", first_present(crypto, "hash")}
         },
         function(fn)
             local function hash(value)
-                local ok, result = pcall(fn, value, "sha256")
+                local ok, result = pcall(fn, value)
+                if ok and type(result) == "string" then
+                    return result
+                end
+
+                ok, result = pcall(fn, value, "sha256")
                 if ok and type(result) == "string" then
                     return result
                 end
@@ -9629,7 +9629,7 @@ do
             "crypt",
             crypt,
             [[
-            base64encode base64decode encrypt decrypt hash random
+            base64encode base64decode encrypt decrypt random
             generatebytes generatekey derive custom_encrypt
             custom_decrypt sha1 sha256 sha384 sha512 md5 blake2b
             ]]
@@ -9976,6 +9976,11 @@ do
 
     local nested_namespace_groups = {
         {
+            "crypt.hash",
+            first_present(crypt, "hash"),
+            "sha1 sha256 sha384 sha512 md5 blake2b"
+        },
+        {
             "crypt.base64",
             first_present(crypt, "base64"),
             "encode decode"
@@ -10068,6 +10073,16 @@ if #failure_records > 0 then
 
         if failure.diagnosis ~= nil then
             emit_warn("    WHY: " .. failure.diagnosis)
+        end
+
+        -- Some external VMs enforce a short uninterrupted scheduler
+        -- budget. Yield between small output batches so a complete
+        -- failure index can be printed without dropping any entries.
+        if i % FAILURE_INDEX_YIELD_INTERVAL == 0
+            and type(task) == "table"
+            and type(task.wait) == "function"
+        then
+            task.wait(0)
         end
     end
 
