@@ -1,5 +1,11 @@
 -- ==========================================================
--- External Luau VM Capability Lab v4.2
+-- External Luau VM Capability Lab v4.3
+--
+-- Outcomes are kept distinct:
+--   PASS    = the capability exists and the tested behavior worked
+--   FAIL    = it exists, but its behavior or return contract was wrong
+--   MISSING = no canonical name or accepted alias was found
+--   SKIP    = a live fixture or an intentionally disabled test is needed
 -- ==========================================================
 
 local PASS = "[PASS]"
@@ -9,9 +15,10 @@ local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
 local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
-local SUITE_VERSION = "v4.2-external-only"
+local SUITE_VERSION = "v4.3-loadstring-config"
 local FAILURE_INDEX_YIELD_INTERVAL = 20
 local NATIVE_WARN = warn
+local LOADSTRING_CONFIG_OVERRIDE, LOADSTRING_VALUES_OVERRIDE = ...
 
 local function emit_warn(message)
     if type(NATIVE_WARN) == "function" then
@@ -24,9 +31,10 @@ end
 print(INFO .. " External Luau VM Capability Lab: " .. SUITE_VERSION)
 
 -- ============================================================
---                   TEST CONFIGURATION
+-- EXHAUSTIVE TEST CONFIGURATION
 -- ============================================================
 --
+-- Everything below is deliberately enabled except WebSocket.
 --
 local EXTERNAL_TEST_CONFIG = {
     run_notifications = true,
@@ -66,9 +74,112 @@ local EXTERNAL_TEST_VALUES = {
     memory_vector_address = nil,
     memory_changed_address = nil,
     memory_changed_type = "u8",
+
     memory_buffer_size = 16,
     input_test_key = 0x87
 }
+
+local EXTERNAL_TEST_CONFIG_KEYS = {}
+for key in pairs(EXTERNAL_TEST_CONFIG) do
+    EXTERNAL_TEST_CONFIG_KEYS[key] = true
+end
+
+
+local EXTERNAL_TEST_VALUE_KEYS = {
+    http_get_url = true,
+    http_post_url = true,
+    http_post_body = true,
+    http_post_content_type = true,
+    http_post_accept = true,
+    websocket_url = true,
+    memory_read_address = true,
+    memory_write_address = true,
+    memory_string_address = true,
+    memory_vector_address = true,
+    memory_changed_address = true,
+    memory_changed_type = true,
+    memory_buffer_size = true,
+    input_test_key = true
+}
+
+local function apply_loadstring_overrides(
+    target,
+    allowed_keys,
+    overrides,
+    boolean_values_only,
+    label
+)
+    if overrides == nil then
+        return 0
+    end
+
+    if type(overrides) ~= "table" then
+        emit_warn(
+            "[CONFIG] Ignored "
+                .. label
+                .. " override: expected table, got "
+                .. type(overrides)
+        )
+        return 0
+    end
+
+    local applied = 0
+    for key, value in pairs(overrides) do
+        if allowed_keys[key] ~= true then
+            emit_warn(
+                "[CONFIG] Ignored unknown "
+                    .. label
+                    .. " key: "
+                    .. tostring(key)
+            )
+        elseif boolean_values_only
+            and type(value) ~= "boolean"
+        then
+            emit_warn(
+                "[CONFIG] Ignored "
+                    .. label
+                    .. "."
+                    .. tostring(key)
+                    .. ": expected boolean, got "
+                    .. type(value)
+            )
+        else
+            target[key] = value
+            applied = applied + 1
+        end
+    end
+
+    return applied
+end
+
+local loadstring_config_count =
+    apply_loadstring_overrides(
+        EXTERNAL_TEST_CONFIG,
+        EXTERNAL_TEST_CONFIG_KEYS,
+        LOADSTRING_CONFIG_OVERRIDE,
+        true,
+        "config"
+    )
+local loadstring_value_count =
+    apply_loadstring_overrides(
+        EXTERNAL_TEST_VALUES,
+        EXTERNAL_TEST_VALUE_KEYS,
+        LOADSTRING_VALUES_OVERRIDE,
+        false,
+        "values"
+    )
+
+if loadstring_config_count > 0
+    or loadstring_value_count > 0
+then
+    print(
+        INFO
+        .. " Loadstring overrides applied: config="
+        .. tostring(loadstring_config_count)
+        .. ", values="
+        .. tostring(loadstring_value_count)
+    )
+end
 
 
 local pass_count = 0
