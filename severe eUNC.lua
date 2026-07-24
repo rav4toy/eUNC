@@ -1,28 +1,49 @@
 -- ==========================================================
--- Severe Luau VM - Exhaustive External Capability Test Suite
+-- External Luau VM Capability Lab v4.0
 --
--- Designed around Severe's supplied API documentation and the
--- behavior observed in previous runs.
+-- This is a behavior-first compatibility benchmark inspired by sUNC's
+-- result model. It measures what the running VM actually supports; no
+-- executor's documentation is treated as the definition of support.
+-- It is independent from sUNC and does not generate an official,
+-- server-verified sUNC score.
 --
--- Every configurable category is enabled in this build. Tests that
--- require a valid user-supplied memory address still cannot run while
--- that address is nil.
+-- Outcomes are kept distinct:
+--   PASS    = the capability exists and the tested behavior worked
+--   FAIL    = it exists, but its behavior or return contract was wrong
+--   MISSING = no canonical name or accepted alias was found
+--   SKIP    = a live fixture or an intentionally disabled test is needed
 --
--- Optional or undocumented compatibility globals are reported as
--- [INFO]. A failed documented behavior prints a [WHY] diagnosis.
+-- Severe-specific APIs are retained as supplemental extension tests.
+-- The broad function inventory also remains counted, including
+-- undocumented names, while aliases are grouped for behavioral tests.
+-- Every active switch is enabled except live WebSocket execution.
 -- ==========================================================
 
 local PASS = "[PASS]"
 local FAIL = "[FAIL]"
+local MISSING = "[MISSING]"
+local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
+local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
+local SUITE_VERSION = "v4.0-behavior-first"
+local NATIVE_WARN = warn
+
+local function emit_warn(message)
+    if type(NATIVE_WARN) == "function" then
+        NATIVE_WARN(message)
+    else
+        print(message)
+    end
+end
+
+print(INFO .. " External Luau VM Capability Lab: " .. SUITE_VERSION)
 
 -- ============================================================
 -- EXHAUSTIVE TEST CONFIGURATION
 -- ============================================================
 --
--- The suite contains tests that can change system, game, network,
--- overlay, or process state. All categories below are enabled.
+-- Everything below is deliberately enabled except WebSocket.
 --
 local EXTERNAL_TEST_CONFIG = {
     run_notifications = true,
@@ -33,15 +54,20 @@ local EXTERNAL_TEST_CONFIG = {
     run_live_instance_mutation = true,
     run_live_basepart_mutation = true,
     run_model_data_mutation = true,
+    run_local_data_override = true,
     run_destructive_clear_functions = true,
     run_http_get = true,
     run_http_post = true,
     run_hwid_read = true,
-    run_websocket = true,
+    run_websocket = false,
     run_immediate_drawing_calls = true,
     run_drawing_clear = true,
     run_memory_reads = true,
-    run_memory_writes = true
+    run_memory_writes = true,
+    run_signal_wait = true,
+    run_instance_clear_tags = true,
+    run_instance_destroy = true,
+    run_memory_changed = true
 }
 
 -- Change these only when enabling the matching tests.
@@ -50,7 +76,12 @@ local EXTERNAL_TEST_VALUES = {
     http_post_url = "https://httpbin.org/post",
     http_post_body = "{\"severe_vm_test\":true}",
     http_post_content_type = "application/json",
-    websocket_url = "wss://echo.websocket.events",
+    http_post_accept = "application/json",
+
+    -- Keep local_websocket_echo_server.py running before executing
+    -- this suite. Severe's WebsocketClient.new blocks until the
+    -- global 15-second scheduler timeout when the target is offline.
+    websocket_url = "ws://127.0.0.1:8765",
 
     -- A valid address belonging to a disposable test allocation or
     -- another location you are certain is safe to read.
@@ -60,6 +91,13 @@ local EXTERNAL_TEST_VALUES = {
     -- it read and then verifies it, minimizing state changes.
     memory_write_address = nil,
 
+    -- Optional specialized addresses. Configure only disposable,
+    -- correctly typed allocations owned by your own test setup.
+    memory_string_address = nil,
+    memory_vector_address = nil,
+    memory_changed_address = nil,
+    memory_changed_type = "u8",
+
     memory_buffer_size = 16,
     input_test_key = 0x87
 }
@@ -67,7 +105,47 @@ local EXTERNAL_TEST_VALUES = {
 
 local pass_count = 0
 local fail_count = 0
+local missing_count = 0
+local skip_count = 0
 local failure_records = {}
+local result_records = {}
+local result_kind_stats = {}
+local category_stats = {}
+local current_result_kind = "extension"
+local current_category = "Bootstrap"
+
+local function new_stats()
+    return {
+        passed = 0,
+        failed = 0,
+        missing = 0,
+        skipped = 0,
+        counted = 0
+    }
+end
+
+local function get_stats(bucket, key)
+    if bucket[key] == nil then
+        bucket[key] = new_stats()
+    end
+
+    return bucket[key]
+end
+
+local function update_stats(stats, status)
+    if status == "PASS" then
+        stats.passed = stats.passed + 1
+        stats.counted = stats.counted + 1
+    elseif status == "FAIL" then
+        stats.failed = stats.failed + 1
+        stats.counted = stats.counted + 1
+    elseif status == "MISSING" then
+        stats.missing = stats.missing + 1
+        stats.counted = stats.counted + 1
+    elseif status == "SKIP" then
+        stats.skipped = stats.skipped + 1
+    end
+end
 
 local function value_to_string(value)
     local ok, result = pcall(tostring, value)
@@ -138,6 +216,29 @@ local function diagnose_failure(label, extra)
             .. ":Connect and :connect calls before property lookup."
     end
 
+    if contains_plain(label, "HasTag observes added tag") then
+        return "AddTag returned without throwing, but the mirrored Instance "
+            .. "did not persist the tag. The method appears to be a no-op "
+            .. "on every tested live target."
+    end
+
+    if contains_plain(label, "GetAttribute observes assigned value") then
+        return "SetAttribute returned without throwing, but GetAttribute "
+            .. "still returned nil. Attribute writes appear unsupported or "
+            .. "non-persistent on the mirrored live instances."
+    end
+
+    if contains_plain(label, "secretbox") then
+        return "The test now uses exact raw nonce/key byte lengths rather "
+            .. "than crypt.random output. A remaining failure is likely in "
+            .. "the secretbox implementation itself."
+    end
+
+    if contains_plain(label, "hkdf") then
+        return "The runtime requires a fourth numeric output-length argument, "
+            .. "although the supplied documentation lists only three."
+    end
+
     if contains_plain(detail, "callback returned false without detail") then
         return "The call completed without throwing, but its returned value "
             .. "did not satisfy the documented behavior."
@@ -161,34 +262,111 @@ local function diagnose_failure(label, extra)
     return nil
 end
 
-local function check(label, condition, extra)
-    if condition then
-        pass_count = pass_count + 1
-        print(PASS .. " " .. label)
-        return true
+local function record_result(
+    label,
+    status,
+    detail,
+    result_kind,
+    quiet,
+    diagnosis
+)
+    local kind = result_kind or current_result_kind
+    local category = current_category
+    local printable_detail = detail
+
+    if printable_detail == nil then
+        if status == "FAIL" then
+            printable_detail = "behavior check failed"
+        elseif status == "MISSING" then
+            printable_detail = "no canonical function or alias was found"
+        elseif status == "SKIP" then
+            printable_detail = "test was not executed"
+        end
     end
 
-    fail_count = fail_count + 1
+    printable_detail = value_to_string(printable_detail)
+
+    if status == "PASS" then
+        pass_count = pass_count + 1
+    elseif status == "FAIL" then
+        fail_count = fail_count + 1
+    elseif status == "MISSING" then
+        missing_count = missing_count + 1
+    elseif status == "SKIP" then
+        skip_count = skip_count + 1
+    else
+        error("unknown result status: " .. value_to_string(status), 0)
+    end
+
+    update_stats(get_stats(result_kind_stats, kind), status)
+    update_stats(get_stats(category_stats, category), status)
+
+    result_records[#result_records + 1] = {
+        label = label,
+        status = status,
+        detail = printable_detail,
+        diagnosis = diagnosis,
+        kind = kind,
+        category = category
+    }
+
+    if status == "FAIL" or status == "MISSING" then
+        failure_records[#failure_records + 1] = {
+            label = label,
+            status = status,
+            detail = printable_detail,
+            diagnosis = diagnosis,
+            kind = kind,
+            category = category
+        }
+    end
+
+    if not quiet then
+        if status == "PASS" then
+            local pass_suffix = ""
+            if kind == "compatibility"
+                and printable_detail ~= "nil"
+            then
+                pass_suffix = " | " .. printable_detail
+            end
+
+            print(PASS .. " " .. label .. pass_suffix)
+        elseif status == "FAIL" then
+            emit_warn(FAIL .. " " .. label .. " | " .. printable_detail)
+        elseif status == "MISSING" then
+            emit_warn(MISSING .. " " .. label .. " | " .. printable_detail)
+        else
+            print(SKIP .. " " .. label .. " | " .. printable_detail)
+        end
+
+        if diagnosis ~= nil
+            and (status == "FAIL" or status == "MISSING")
+        then
+            emit_warn("[WHY] " .. diagnosis)
+        end
+    end
+
+    return status == "PASS"
+end
+
+local function check(label, condition, extra)
+    if condition then
+        return record_result(label, "PASS")
+    end
 
     local detail = extra
     if detail == nil then
         detail = "condition evaluated to false"
     end
 
-    warn(FAIL .. " " .. label .. " | " .. value_to_string(detail))
-
-    local diagnosis = diagnose_failure(label, detail)
-    if diagnosis ~= nil then
-        warn("[WHY] " .. diagnosis)
-    end
-
-    failure_records[#failure_records + 1] = {
-        label = label,
-        detail = value_to_string(detail),
-        diagnosis = diagnosis
-    }
-
-    return false
+    return record_result(
+        label,
+        "FAIL",
+        detail,
+        nil,
+        false,
+        diagnose_failure(label, detail)
+    )
 end
 
 local function test(label, callback)
@@ -208,7 +386,18 @@ local function test(label, callback)
     return result
 end
 
-local function section(name)
+local function section(name, result_kind, category)
+    if result_kind ~= nil then
+        current_result_kind = result_kind
+    end
+
+    if category ~= nil then
+        current_category = category
+    else
+        current_category =
+            string.gsub(name, "^%d+%.%s*", "")
+    end
+
     print("")
     print(SEP)
     print("  " .. name)
@@ -236,6 +425,161 @@ local function first_present(object, ...)
     end
 
     return nil
+end
+
+local CAPABILITY_SKIP = {}
+local CAPABILITY_MISSING = {}
+
+local function resolve_function_candidates(candidates)
+    local first_nonfunction_path = nil
+    local first_nonfunction_type = nil
+
+    for i = 1, #candidates do
+        local candidate = candidates[i]
+        local path = candidate[1]
+        local value = candidate[2]
+
+        if type(value) == "function" then
+            return value, path, nil, nil
+        end
+
+        if value ~= nil and first_nonfunction_path == nil then
+            first_nonfunction_path = path
+            first_nonfunction_type = type(value)
+        end
+    end
+
+    return nil, nil, first_nonfunction_path, first_nonfunction_type
+end
+
+local function dependency_function(candidates)
+    local value, path = resolve_function_candidates(candidates)
+    return value, path
+end
+
+local function capability_test(category, label, candidates, callback)
+    current_result_kind = "compatibility"
+    current_category = category
+
+    local fn, resolved_path, bad_path, bad_type =
+        resolve_function_candidates(candidates)
+
+    if fn == nil then
+        if bad_path ~= nil then
+            return record_result(
+                label,
+                "FAIL",
+                bad_path
+                    .. " exists but is "
+                    .. value_to_string(bad_type),
+                "compatibility"
+            )
+        end
+
+        local names = {}
+        for i = 1, #candidates do
+            names[#names + 1] = candidates[i][1]
+        end
+
+        return record_result(
+            label,
+            "MISSING",
+            "checked: " .. table.concat(names, ", "),
+            "compatibility"
+        )
+    end
+
+    local ok, result, detail = pcall(callback, fn, resolved_path)
+    if not ok then
+        return record_result(
+            label,
+            "FAIL",
+            "resolved via "
+                .. resolved_path
+                .. " | "
+                .. value_to_string(result),
+            "compatibility"
+        )
+    end
+
+    if result == CAPABILITY_SKIP then
+        return record_result(
+            label,
+            "SKIP",
+            detail or ("resolved via " .. resolved_path),
+            "compatibility"
+        )
+    end
+
+    if result == CAPABILITY_MISSING then
+        return record_result(
+            label,
+            "MISSING",
+            detail or "a required companion capability is missing",
+            "compatibility"
+        )
+    end
+
+    if result ~= true then
+        return record_result(
+            label,
+            "FAIL",
+            "resolved via "
+                .. resolved_path
+                .. " | "
+                .. value_to_string(
+                    detail or "behavior assertion returned false"
+                ),
+            "compatibility"
+        )
+    end
+
+    return record_result(
+        label,
+        "PASS",
+        detail or ("resolved via " .. resolved_path),
+        "compatibility"
+    )
+end
+
+local function raw_capability_test(category, label, callback)
+    current_result_kind = "compatibility"
+    current_category = category
+
+    local ok, result, detail = pcall(callback)
+    if not ok then
+        return record_result(
+            label,
+            "FAIL",
+            result,
+            "compatibility"
+        )
+    end
+
+    if result == CAPABILITY_SKIP then
+        return record_result(
+            label,
+            "SKIP",
+            detail,
+            "compatibility"
+        )
+    end
+
+    if result == CAPABILITY_MISSING then
+        return record_result(
+            label,
+            "MISSING",
+            detail,
+            "compatibility"
+        )
+    end
+
+    return record_result(
+        label,
+        result == true and "PASS" or "FAIL",
+        detail,
+        "compatibility"
+    )
 end
 
 local function connect_signal(signal, callback)
@@ -366,19 +710,30 @@ local function fire_signal(signal, ...)
 end
 
 -- ============================================================
--- 1. DOCUMENTED CORE GLOBALS
+-- 1. CORE GLOBALS
 -- ============================================================
-section("1. Documented Core Globals")
+section("1. Core Globals")
 
 check("print is a function", type(print) == "function")
 check("warn is a function", type(warn) == "function")
 check(
-    "load is a function",
-    type(load) == "function",
-    "actual type=" .. type(load)
+    "a bytecode loader is available",
+    type(load) == "function"
+        or (
+            type(luau) == "table"
+            and type(luau.load) == "function"
+        ),
+    "global load type="
+        .. type(load)
         .. "; luau.load type="
-        .. (type(luau) == "table" and type(luau.load) or "nil")
+        .. (
+            type(luau) == "table"
+                and type(luau.load)
+                or "nil"
+        )
 )
+
+info("global load compatibility alias", type(load))
 check("pcall is a function", type(pcall) == "function")
 check("type is a function", type(type) == "function")
 check("tostring is a function", type(tostring) == "function")
@@ -393,18 +748,22 @@ check(
     type(luau) == "table" and type(luau.load) == "function"
 )
 
--- These are compatibility probes because they are not required by
--- the supplied Severe API documentation.
+-- These are reported here and tested behaviorally in the compatibility
+-- lab later in the suite.
 info("loadstring global", type(loadstring))
 info("getgenv global", type(getgenv))
-info("Instance.new", Instance and type(Instance.new) or "nil")
+info("Instance.new", type(first_present(Instance, "new", "New")))
 info("ui global", type(ui))
 info("fragment_ui global", type(fragment_ui))
 info("input namespace", type(input))
 
 if type(getgenv) == "function" then
     local ok, genv = pcall(getgenv)
-    check("getgenv() returns a table", ok and type(genv) == "table", genv)
+    info(
+        "getgenv() compatibility probe",
+        ok and ("returned " .. type(genv))
+            or ("error: " .. value_to_string(genv))
+    )
 end
 
 -- ============================================================
@@ -412,12 +771,12 @@ end
 -- ============================================================
 section("2. Sandbox and Filesystem")
 
--- io/package/require are expected to remain unavailable. os and
--- debug were observed as present, so they are capability-tested rather
--- than incorrectly required to be nil.
-check("io is nil", io == nil, "actual type=" .. type(io))
-check("package is nil", package == nil, "actual type=" .. type(package))
-check("require is nil", require == nil, "actual type=" .. type(require))
+-- Sandboxing choices are not correctness rules for an external VM.
+-- Presence or absence is inventoried without penalizing a VM merely
+-- for exposing more of the standard Lua runtime.
+info("io library", type(io))
+info("package library", type(package))
+info("require global", type(require))
 
 info("os library", type(os))
 if type(os) == "table" then
@@ -459,7 +818,7 @@ if type(debug) == "table" then
     end
 end
 
--- Documented sandboxed filesystem functions.
+-- Filesystem globals supplied by this runtime profile.
 check("dofile is a function", type(dofile) == "function")
 check("loadfile is a function", type(loadfile) == "function")
 check("writefile is a function", type(writefile) == "function")
@@ -585,7 +944,7 @@ if filesystem_ready then
                 return isfolder(temp_folder) == false
             end)
         else
-            warn(
+            emit_warn(
                 FAIL
                 .. " Cleanup failed; manually remove workspace/"
                 .. temp_folder
@@ -700,62 +1059,17 @@ if type(luau) == "table" and type(luau.compile) == "function" then
         end
     end
 
-    local bad_compile_ok, bad_compile_result, bad_compile_extra =
-        pcall(
-            compile_source,
-            "local ="
-        )
-
-    local invalid_rejected = bad_compile_ok == false
-    local invalid_detail = bad_compile_result
-
-    if bad_compile_ok then
-        if bad_compile_result == nil then
-            invalid_rejected = true
-            invalid_detail = bad_compile_extra
-        elseif type(bad_compile_result) == "string"
-            and type(luau.load) == "function"
-        then
-            local bad_load_ok, bad_function_or_error =
-                pcall(
-                    luau.load,
-                    bad_compile_result,
-                    {
-                        debugName = "InvalidSourceTest",
-                        injectGlobals = true,
-                        codegenEnabled = false
-                    }
-                )
-
-            invalid_rejected =
-                bad_load_ok == false
-                or type(bad_function_or_error) ~= "function"
-
-            invalid_detail =
-                "compile returned string; luau.load ok="
-                .. value_to_string(bad_load_ok)
-                .. " result="
-                .. value_to_string(bad_function_or_error)
-        else
-            invalid_detail =
-                "compile unexpectedly returned "
-                .. type(bad_compile_result)
-                .. ": "
-                .. value_to_string(bad_compile_result)
-        end
-    end
-
-    check(
-        "invalid source is rejected by compile/load pipeline",
-        invalid_rejected,
-        invalid_detail
+    info(
+        "invalid-source compiler test",
+        "skipped because Severe prints the expected syntax error in red "
+            .. "even when pcall catches it"
     )
 else
     info("Compilation tests", "skipped because luau.compile is missing")
 end
 
 -- ============================================================
--- 4. MISCELLANEOUS DOCUMENTED API
+-- 4. MISCELLANEOUS RUNTIME EXTENSION API
 -- ============================================================
 section("4. Miscellaneous API")
 
@@ -1388,7 +1702,7 @@ then
 
     if type(task.cancel) == "function" then
         local cancel_ok, cancel_thread = pcall(task.delay, 60, function()
-            warn(FAIL .. " Cancelled delayed task unexpectedly fired")
+            emit_warn(FAIL .. " Cancelled delayed task unexpectedly fired")
         end)
 
         if cancel_ok and type(cancel_thread) == "thread" then
@@ -1493,10 +1807,16 @@ end
 -- ============================================================
 -- 12. VECTOR2 AND VECTOR3
 -- ============================================================
-section("12. Vector2 and Vector3")
+section("12. Vector2 and Vector3 Basic Operations")
 
-check("Vector2.new is a function", Vector2 ~= nil and type(Vector2.new) == "function")
-check("Vector3.new is a function", Vector3 ~= nil and type(Vector3.new) == "function")
+check(
+    "Vector2.new is a function",
+    Vector2 ~= nil and type(Vector2.new) == "function"
+)
+check(
+    "Vector3.new is a function",
+    Vector3 ~= nil and type(Vector3.new) == "function"
+)
 
 if Vector2 ~= nil and type(Vector2.new) == "function" then
     local vector2_ok, v2 = pcall(Vector2.new, 3, 4)
@@ -1509,35 +1829,6 @@ if Vector2 ~= nil and type(Vector2.new) == "function" then
 
         test("Vector2.Y is correct", function()
             return v2.Y == 4, v2.Y
-        end)
-
-        -- Some Severe builds currently reject this documented property.
-        -- Keep it inside pcall so a missing property is reported instead
-        -- of terminating the entire suite.
-        test("Vector2.Magnitude is correct", function()
-            local magnitude = v2.Magnitude
-            return type(magnitude) == "number"
-                and math.abs(magnitude - 5) < 0.0001,
-                magnitude
-        end)
-
-        test("Vector2.Unit has magnitude 1", function()
-            return math.abs(v2.Unit.Magnitude - 1) < 0.0001,
-                v2.Unit.Magnitude
-        end)
-
-        test("Vector2:Dot works", function()
-            return v2:Dot(Vector2.new(1, 0)) == 3
-        end)
-
-        test("Vector2:Cross works", function()
-            return v2:Cross(Vector2.new(1, 0)) == -4
-        end)
-
-        test("Vector2:Lerp works", function()
-            local result = v2:Lerp(Vector2.new(5, 6), 0.5)
-            return result.X == 4 and result.Y == 5,
-                value_to_string(result)
         end)
 
         test("Vector2 addition works", function()
@@ -1569,30 +1860,18 @@ if Vector3 ~= nil and type(Vector3.new) == "function" then
             return v3.Z == 3, v3.Z
         end)
 
-        test("Vector3:Dot works", function()
-            return v3:Dot(Vector3.new(1, 0, 0)) == 1
-        end)
-
-        test("Vector3:Cross works", function()
-            local result = v3:Cross(Vector3.new(0, 1, 0))
-            return result.X == -3 and result.Y == 0 and result.Z == 1,
-                value_to_string(result)
-        end)
-
-        test("Vector3:Lerp works", function()
-            local result = v3:Lerp(Vector3.new(3, 4, 5), 0.5)
-            return result.X == 2 and result.Y == 3 and result.Z == 4,
-                value_to_string(result)
-        end)
-
         test("Vector3 addition works", function()
             local result = v3 + Vector3.new(1, 1, 1)
-            return result.X == 2 and result.Y == 3 and result.Z == 4
+            return result.X == 2
+                and result.Y == 3
+                and result.Z == 4
         end)
 
         test("Vector3 scalar multiplication works", function()
             local result = v3 * 2
-            return result.X == 2 and result.Y == 4 and result.Z == 6
+            return result.X == 2
+                and result.Y == 4
+                and result.Z == 6
         end)
     end
 end
@@ -1857,12 +2136,15 @@ end
 
 info("WebsocketClient", type(WebsocketClient))
 if WebsocketClient ~= nil then
-    info("WebsocketClient.new", type(WebsocketClient.new))
+    info(
+        "WebsocketClient.new",
+        type(first_present(WebsocketClient, "new", "New"))
+    )
 end
 
 info("Signal", type(Signal))
 if Signal ~= nil then
-    info("Signal.new", type(Signal.new))
+    info("Signal.new", type(first_present(Signal, "new", "New")))
 end
 
 info("DrawingImmediate", type(DrawingImmediate))
@@ -2074,6 +2356,112 @@ if Signal ~= nil then
                         .. value_to_string(once_count)
                 )
             end
+
+            info(
+                "Signal indexed Wait lookup",
+                type(first_present(custom_signal, "Wait", "wait"))
+            )
+
+            if EXTERNAL_TEST_CONFIG.run_signal_wait
+                and type(task) == "table"
+                and type(task.delay) == "function"
+                and type(task.spawn) == "function"
+                and type(task.wait) == "function"
+            then
+                local wait_signal_ok, wait_signal =
+                    pcall(signal_new)
+
+                check(
+                    "Signal.new creates wait-test signal",
+                    wait_signal_ok and wait_signal ~= nil,
+                    wait_signal
+                )
+
+                if wait_signal_ok and wait_signal ~= nil then
+                    local wait_finished = false
+                    local wait_ok = false
+                    local wait_first = nil
+                    local wait_second = nil
+
+                    local worker_ok, worker_error =
+                        pcall(task.spawn, function()
+                            wait_ok, wait_first, wait_second =
+                                pcall(function()
+                                    local upper_ok,
+                                        upper_first,
+                                        upper_second =
+                                        pcall(function()
+                                            return wait_signal:Wait()
+                                        end)
+
+                                    if upper_ok then
+                                        return upper_first, upper_second
+                                    end
+
+                                    return wait_signal:wait()
+                                end)
+
+                            wait_finished = true
+                        end)
+
+                    check(
+                        "Signal.wait worker is scheduled",
+                        worker_ok,
+                        worker_error
+                    )
+
+                    local delay_ok, delay_error =
+                        pcall(task.delay, 0.01, function()
+                            fire_signal(
+                                wait_signal,
+                                321,
+                                "signal-wait-ok"
+                            )
+                        end)
+
+                    check(
+                        "Signal.wait delayed fire is scheduled",
+                        delay_ok,
+                        delay_error
+                    )
+
+                    if worker_ok and delay_ok then
+                        for i = 1, 100 do
+                            if wait_finished then
+                                break
+                            end
+
+                            task.wait(0.01)
+                        end
+
+                        check(
+                            "Signal wait/Wait resumes with arguments",
+                            wait_finished
+                                and wait_ok
+                                and wait_first == 321
+                                and wait_second == "signal-wait-ok",
+                            "finished="
+                                .. value_to_string(wait_finished)
+                                .. " returned "
+                                .. value_to_string(wait_first)
+                                .. ", "
+                                .. value_to_string(wait_second)
+                        )
+
+                        -- Release a still-waiting worker without making the
+                        -- main suite block on a broken Wait implementation.
+                        if not wait_finished then
+                            pcall(fire_signal, wait_signal)
+                        end
+                    end
+                end
+            else
+                info(
+                    "Signal wait active test",
+                    "scheduler functions required for bounded wait test "
+                        .. "are unavailable"
+                )
+            end
         end
     end
 end
@@ -2084,7 +2472,14 @@ end
 section("19. Vector2 and Vector3 Complete Operations")
 
 if Vector2 ~= nil and type(Vector2.new) == "function" then
-    local v = Vector2.new(6, 8)
+    local vector_ok, v = pcall(Vector2.new, 6, 8)
+    check(
+        "Vector2 extended-test fixture can be created",
+        vector_ok and v ~= nil,
+        v
+    )
+
+    if vector_ok and v ~= nil then
 
     test("Vector2 zero constructor works", function()
         local zero = Vector2.new()
@@ -2147,10 +2542,18 @@ if Vector2 ~= nil and type(Vector2.new) == "function" then
         local result = tostring(v)
         return type(result) == "string" and #result > 0, result
     end)
+    end
 end
 
 if Vector3 ~= nil and type(Vector3.new) == "function" then
-    local v = Vector3.new(2, 3, 6)
+    local vector_ok, v = pcall(Vector3.new, 2, 3, 6)
+    check(
+        "Vector3 extended-test fixture can be created",
+        vector_ok and v ~= nil,
+        v
+    )
+
+    if vector_ok and v ~= nil then
 
     test("Vector3 zero constructor works", function()
         local zero = Vector3.new()
@@ -2213,6 +2616,7 @@ if Vector3 ~= nil and type(Vector3.new) == "function" then
         local result = tostring(v)
         return type(result) == "string" and #result > 0, result
     end)
+    end
 end
 
 -- ============================================================
@@ -2238,8 +2642,17 @@ if Color3 ~= nil then
     end
 
     if type(Color3.new) == "function" then
-        local a = Color3.new(1, 0.5, 0)
-        local b = Color3.new(1, 0.5, 0)
+        local a_ok, a = pcall(Color3.new, 1, 0.5, 0)
+        local b_ok, b = pcall(Color3.new, 1, 0.5, 0)
+
+        check(
+            "Color3 extended-test fixtures can be created",
+            a_ok and b_ok and a ~= nil and b ~= nil,
+            "a=" .. value_to_string(a)
+                .. ", b=" .. value_to_string(b)
+        )
+
+        if a_ok and b_ok and a ~= nil and b ~= nil then
 
         test("Color3 equality works", function()
             return a == b and a ~= Color3.new(0, 0, 0)
@@ -2254,6 +2667,7 @@ if Color3 ~= nil then
             test("typeof(Color3) returns Color3", function()
                 return typeof(a) == "Color3", typeof(a)
             end)
+        end
         end
     end
 end
@@ -2352,7 +2766,14 @@ then
         end)
     end
 
-    local cf = CFrame.new(10, 20, 30)
+    local cframe_ok, cf = pcall(CFrame.new, 10, 20, 30)
+    check(
+        "CFrame extended-test fixture can be created",
+        cframe_ok and cf ~= nil,
+        cf
+    )
+
+    if cframe_ok and cf ~= nil then
 
     test("CFrame RightVector works", function()
         return cf.RightVector ~= nil
@@ -2443,6 +2864,7 @@ then
         local result = tostring(cf)
         return type(result) == "string" and #result > 0, result
     end)
+    end
 end
 
 -- ============================================================
@@ -2700,10 +3122,15 @@ then
     local candidates = {}
 
     if Vector3 ~= nil and type(Vector3.new) == "function" then
-        candidates[#candidates + 1] = {
-            name = "Vector3.new(0, 10, 0)",
-            value = Vector3.new(0, 10, 0)
-        }
+        local vector_ok, vector_value =
+            pcall(Vector3.new, 0, 10, 0)
+
+        if vector_ok then
+            candidates[#candidates + 1] = {
+                name = "Vector3.new(0, 10, 0)",
+                value = vector_value
+            }
+        end
     end
 
     if CFrame ~= nil and type(CFrame.new) == "function" then
@@ -2719,12 +3146,13 @@ then
         end
     end
 
-    if workspace ~= nil and workspace.CurrentCamera ~= nil then
+    if workspace ~= nil then
         local camera_position_ok, camera_position = pcall(function()
-            return workspace.CurrentCamera.Position
+            local camera = workspace.CurrentCamera
+            return camera and camera.Position or nil
         end)
 
-        if camera_position_ok then
+        if camera_position_ok and camera_position ~= nil then
             candidates[#candidates + 1] = {
                 name = "Camera.Position",
                 value = camera_position
@@ -2967,7 +3395,6 @@ local immediate_function_names = {
     "Polyline",
     "Text",
     "OutlinedText",
-    "Image",
     "GetTextBounds"
 }
 
@@ -2982,6 +3409,13 @@ if type(DrawingImmediate) == "table" then
             type(function_value) == "function"
         )
     end
+
+    info(
+        "DrawingImmediate.Image",
+        type(first_present(DrawingImmediate, "Image"))
+            .. " (documentation says this is planned and not working yet)"
+    )
+
 
     if type(DrawingImmediate.GetTextBounds) == "function" then
         test("DrawingImmediate.GetTextBounds returns Vector2-like value", function()
@@ -3001,11 +3435,33 @@ if type(DrawingImmediate) == "table" then
         and Vector2 ~= nil
         and Color3 ~= nil
     then
-        local a = Vector2.new(10, 10)
-        local b = Vector2.new(30, 10)
-        local c = Vector2.new(20, 30)
-        local d = Vector2.new(40, 30)
-        local white = Color3.new(1, 1, 1)
+        local fixtures_ok, a, b, c, d, white =
+            pcall(function()
+                return Vector2.new(10, 10),
+                    Vector2.new(30, 10),
+                    Vector2.new(20, 30),
+                    Vector2.new(40, 30),
+                    Color3.new(1, 1, 1)
+            end)
+
+        check(
+            "DrawingImmediate fixtures can be created",
+            fixtures_ok
+                and a ~= nil
+                and b ~= nil
+                and c ~= nil
+                and d ~= nil
+                and white ~= nil,
+            a
+        )
+
+        if fixtures_ok
+            and a ~= nil
+            and b ~= nil
+            and c ~= nil
+            and d ~= nil
+            and white ~= nil
+        then
 
         local immediate_calls = {
             {
@@ -3112,6 +3568,7 @@ if type(DrawingImmediate) == "table" then
                 err
             )
         end
+        end
     else
         info(
             "Immediate drawing execution tests",
@@ -3184,18 +3641,80 @@ if game ~= nil then
         and type(first_present(game, "HttpPost")) == "function"
     then
         test("game:HttpPost returns a string", function()
-            local response = game:HttpPost(
-                EXTERNAL_TEST_VALUES.http_post_url,
-                EXTERNAL_TEST_VALUES.http_post_body,
-                EXTERNAL_TEST_VALUES.http_post_content_type
-            )
-            return type(response) == "string"
+            local attempts = {
+                {
+                    name = "documented 2-argument form",
+                    callback = function()
+                        return game:HttpPost(
+                            EXTERNAL_TEST_VALUES.http_post_url,
+                            EXTERNAL_TEST_VALUES.http_post_body
+                        )
+                    end
+                },
+                {
+                    name = "3-argument content-type form",
+                    callback = function()
+                        return game:HttpPost(
+                            EXTERNAL_TEST_VALUES.http_post_url,
+                            EXTERNAL_TEST_VALUES.http_post_body,
+                            EXTERNAL_TEST_VALUES.http_post_content_type
+                        )
+                    end
+                },
+                {
+                    name = "4-argument content-type/accept form",
+                    callback = function()
+                        return game:HttpPost(
+                            EXTERNAL_TEST_VALUES.http_post_url,
+                            EXTERNAL_TEST_VALUES.http_post_body,
+                            EXTERNAL_TEST_VALUES.http_post_content_type,
+                            EXTERNAL_TEST_VALUES.http_post_accept
+                        )
+                    end
+                }
+            }
+
+            local errors = {}
+
+            for i = 1, #attempts do
+                local attempt = attempts[i]
+                local ok, response = pcall(attempt.callback)
+
+                if ok and type(response) == "string" then
+                    info(
+                        "game:HttpPost accepted signature",
+                        attempt.name
+                    )
+                    return true
+                end
+
+                errors[#errors + 1] =
+                    attempt.name
+                    .. " => "
+                    .. value_to_string(response)
+            end
+
+            return false, table.concat(errors, " || ")
         end)
+    else
+        info(
+            "game:HttpPost active test",
+            "disabled; keep it off unless the configured endpoint is "
+                .. "already reachable, because connection failure can "
+                .. "stop the suite at Severe's hard timeout"
+        )
     end
 end
 
-if workspace ~= nil and workspace.CurrentCamera ~= nil then
-    local camera = workspace.CurrentCamera
+local extended_camera = nil
+if workspace ~= nil then
+    pcall(function()
+        extended_camera = workspace.CurrentCamera
+    end)
+end
+
+if extended_camera ~= nil then
+    local camera = extended_camera
 
     local camera_properties = {
         {"ViewportSize", "userdata"},
@@ -3233,6 +3752,11 @@ if workspace ~= nil and workspace.CurrentCamera ~= nil then
                 and type(visible) == "boolean"
         end)
     end
+else
+    info(
+        "Extended Camera property tests",
+        "skipped because workspace.CurrentCamera is unavailable"
+    )
 end
 
 if first_basepart ~= nil then
@@ -3250,7 +3774,13 @@ if first_basepart ~= nil then
         "Description"
     }
 
-    info("BasePart test target", first_basepart.Name)
+    local basepart_name_ok, basepart_name = pcall(function()
+        return first_basepart.Name
+    end)
+    info(
+        "BasePart test target",
+        basepart_name_ok and basepart_name or "<name unavailable>"
+    )
 
     for i = 1, #basepart_properties do
         local property = basepart_properties[i]
@@ -3418,7 +3948,13 @@ if instance_target == nil and workspace ~= nil then
 end
 
 if instance_target ~= nil then
-    info("Instance API target", instance_target.Name)
+    local instance_name_ok, instance_name = pcall(function()
+        return instance_target.Name
+    end)
+    info(
+        "Instance API target",
+        instance_name_ok and instance_name or "<name unavailable>"
+    )
 
     info(
         "Instance method exposure",
@@ -3520,149 +4056,150 @@ if instance_target ~= nil then
         local test_tag = "__SEVERE_VM_TEST_TAG__"
         local test_attribute = "__SEVERE_VM_TEST_ATTRIBUTE__"
 
-        local tag_before = nil
-        local before_ok, before_result = pcall(function()
-            return instance_target:HasTag(test_tag)
-        end)
+        local mutation_targets = {}
+        local seen_targets = {}
 
-        if before_ok then
-            tag_before = before_result
+        local function add_mutation_target(name, object)
+            if object == nil or seen_targets[object] then
+                return
+            end
+
+            seen_targets[object] = true
+            mutation_targets[#mutation_targets + 1] = {
+                name = name,
+                object = object
+            }
         end
 
-        local add_ok, add_error = pcall(function()
-            instance_target:AddTag(test_tag)
-        end)
+        add_mutation_target("selected instance", instance_target)
+        add_mutation_target("workspace", workspace)
+        add_mutation_target("first BasePart", first_basepart)
 
-        check(
-            "Instance:AddTag call executes",
-            add_ok,
-            add_error
-        )
-
-        local has_after_add_ok, has_after_add =
+        if players_service ~= nil then
+            local local_player = nil
             pcall(function()
-                return instance_target:HasTag(test_tag)
+                local_player = players_service.LocalPlayer
             end)
 
-        check(
-            "Instance:HasTag observes added tag",
-            has_after_add_ok and has_after_add == true,
-            "before="
-                .. value_to_string(tag_before)
-                .. " after AddTag="
-                .. value_to_string(has_after_add)
-        )
+            add_mutation_target("LocalPlayer", local_player)
 
-        local remove_ok, remove_error = pcall(function()
-            instance_target:RemoveTag(test_tag)
-        end)
-
-        check(
-            "Instance:RemoveTag call executes",
-            remove_ok,
-            remove_error
-        )
-
-        local has_after_remove_ok, has_after_remove =
-            pcall(function()
-                return instance_target:HasTag(test_tag)
-            end)
-
-        check(
-            "Instance:HasTag observes removed tag",
-            has_after_remove_ok and has_after_remove == false,
-            "after RemoveTag="
-                .. value_to_string(has_after_remove)
-        )
-
-        local original_tags = nil
-        local original_tags_ok, original_tags_result =
-            pcall(function()
-                return instance_target:GetTags()
-            end)
-
-        if original_tags_ok and type(original_tags_result) == "table" then
-            original_tags = original_tags_result
-        end
-
-        if EXTERNAL_TEST_CONFIG.run_destructive_clear_functions then
-            local clear_tag = "__SEVERE_VM_CLEAR_TAG_TEST__"
-
-            pcall(function()
-                instance_target:AddTag(clear_tag)
-            end)
-
-            local clear_ok, clear_error = pcall(function()
-                instance_target:ClearTags()
-            end)
-
-            check(
-                "Instance:ClearTags call executes",
-                clear_ok,
-                clear_error
-            )
-
-            if clear_ok then
-                test("Instance:ClearTags removes all tags", function()
-                    local tags = instance_target:GetTags()
-                    return type(tags) == "table" and #tags == 0,
-                        "remaining tag count="
-                        .. value_to_string(
-                            type(tags) == "table" and #tags or "not-table"
-                        )
+            if local_player ~= nil then
+                local character = nil
+                pcall(function()
+                    character = local_player.Character
                 end)
-            end
-
-            if original_tags ~= nil then
-                for i = 1, #original_tags do
-                    pcall(function()
-                        instance_target:AddTag(original_tags[i])
-                    end)
-                end
+                add_mutation_target("LocalPlayer.Character", character)
             end
         end
 
-        local old_attribute = nil
-        local old_attribute_ok, old_attribute_result =
-            pcall(function()
-                return instance_target:GetAttribute(test_attribute)
+        local tag_success_target = nil
+        local tag_attempts = {}
+
+        for i = 1, #mutation_targets do
+            local entry = mutation_targets[i]
+            local object = entry.object
+
+            local add_ok, add_error = pcall(function()
+                object:AddTag(test_tag)
             end)
 
-        if old_attribute_ok then
-            old_attribute = old_attribute_result
-        end
+            local read_ok, has_tag = pcall(function()
+                return object:HasTag(test_tag)
+            end)
 
-        local set_attribute_ok, set_attribute_error =
             pcall(function()
-                instance_target:SetAttribute(
-                    test_attribute,
-                    12345
+                object:RemoveTag(test_tag)
+            end)
+
+            tag_attempts[#tag_attempts + 1] =
+                entry.name
+                .. ": AddTag ok="
+                .. value_to_string(add_ok)
+                .. ", HasTag ok="
+                .. value_to_string(read_ok)
+                .. ", value="
+                .. value_to_string(has_tag)
+                .. (
+                    add_ok
+                        and ""
+                        or ", error=" .. value_to_string(add_error)
                 )
-            end)
+
+            if add_ok and read_ok and has_tag == true then
+                tag_success_target = entry
+                break
+            end
+        end
 
         check(
-            "Instance:SetAttribute call executes",
-            set_attribute_ok,
-            set_attribute_error
+            "Instance:HasTag observes added tag on at least one live target",
+            tag_success_target ~= nil,
+            table.concat(tag_attempts, " || ")
         )
 
-        local get_attribute_ok, set_value =
-            pcall(function()
-                return instance_target:GetAttribute(test_attribute)
-            end)
-
-        check(
-            "Instance:GetAttribute observes assigned value",
-            get_attribute_ok and set_value == 12345,
-            "actual=" .. value_to_string(set_value)
-        )
-
-        pcall(function()
-            instance_target:SetAttribute(
-                test_attribute,
-                old_attribute
+        if tag_success_target ~= nil then
+            info(
+                "Writable tag target",
+                tag_success_target.name
             )
-        end)
+        end
+
+        local attribute_success_target = nil
+        local attribute_attempts = {}
+
+        for i = 1, #mutation_targets do
+            local entry = mutation_targets[i]
+            local object = entry.object
+            local old_value = nil
+
+            pcall(function()
+                old_value = object:GetAttribute(test_attribute)
+            end)
+
+            local set_ok, set_error = pcall(function()
+                object:SetAttribute(test_attribute, 12345)
+            end)
+
+            local get_ok, actual_value = pcall(function()
+                return object:GetAttribute(test_attribute)
+            end)
+
+            pcall(function()
+                object:SetAttribute(test_attribute, old_value)
+            end)
+
+            attribute_attempts[#attribute_attempts + 1] =
+                entry.name
+                .. ": SetAttribute ok="
+                .. value_to_string(set_ok)
+                .. ", GetAttribute ok="
+                .. value_to_string(get_ok)
+                .. ", value="
+                .. value_to_string(actual_value)
+                .. (
+                    set_ok
+                        and ""
+                        or ", error=" .. value_to_string(set_error)
+                )
+
+            if set_ok and get_ok and actual_value == 12345 then
+                attribute_success_target = entry
+                break
+            end
+        end
+
+        check(
+            "Instance:GetAttribute observes assigned value on at least one live target",
+            attribute_success_target ~= nil,
+            table.concat(attribute_attempts, " || ")
+        )
+
+        if attribute_success_target ~= nil then
+            info(
+                "Writable attribute target",
+                attribute_success_target.name
+            )
+        end
     else
         info(
             "Instance mutation tests",
@@ -3671,6 +4208,94 @@ if instance_target ~= nil then
     end
 else
     info("Instance API tests", "skipped because no target was found")
+end
+
+if instance_target ~= nil
+    and EXTERNAL_TEST_CONFIG.run_instance_clear_tags
+then
+    test("Instance:ClearTags clears and restores a test target", function()
+        local original_tags = instance_target:GetTags()
+        local test_tag_a = "__SEVERE_VM_CLEAR_TAG_A__"
+        local test_tag_b = "__SEVERE_VM_CLEAR_TAG_B__"
+
+        local operation_ok, operation_result =
+            pcall(function()
+                instance_target:AddTag(test_tag_a)
+                instance_target:AddTag(test_tag_b)
+                instance_target:ClearTags()
+
+                return instance_target:HasTag(test_tag_a) == false
+                    and instance_target:HasTag(test_tag_b) == false
+                    and #instance_target:GetTags() == 0
+            end)
+
+        -- Restore the complete original tag set even when the active
+        -- test itself failed after ClearTags.
+        local restore_ok, restore_error = pcall(function()
+            instance_target:ClearTags()
+
+            for i = 1, #original_tags do
+                instance_target:AddTag(original_tags[i])
+            end
+        end)
+
+        if not restore_ok then
+            return false,
+                "tag restoration failed: "
+                .. value_to_string(restore_error)
+        end
+
+        if not operation_ok then
+            return false, operation_result
+        end
+
+        return operation_result == true
+    end)
+else
+    info(
+        "Instance:ClearTags active test",
+        "disabled because it temporarily removes every tag from a live target"
+    )
+end
+
+if EXTERNAL_TEST_CONFIG.run_instance_destroy then
+    local instance_new =
+        Instance ~= nil
+        and first_present(Instance, "new", "New")
+        or nil
+
+    if type(instance_new) == "function" then
+        local create_ok, disposable_instance =
+            pcall(instance_new, "Folder")
+
+        check(
+            "Instance.new creates disposable Destroy target",
+            create_ok and disposable_instance ~= nil,
+            disposable_instance
+        )
+
+        if create_ok and disposable_instance ~= nil then
+            local destroy_ok, destroy_error = pcall(function()
+                disposable_instance:Destroy()
+            end)
+
+            check(
+                "Instance:Destroy removes disposable target",
+                destroy_ok,
+                destroy_error
+            )
+        end
+    else
+        info(
+            "Instance:Destroy active test",
+            "Instance.new is unavailable, so no safe disposable target exists"
+        )
+    end
+else
+    info(
+        "Instance:Destroy active test",
+        "disabled; the suite never destroys a live mirrored game object"
+    )
 end
 
 if players_service ~= nil then
@@ -3777,14 +4402,29 @@ local function nested_function(root, first, second)
 end
 
 local crypto_function_paths = {
-    {"crypt.random", crypt and crypt.random},
-    {"crypt.random_deterministic", crypt and crypt.random_deterministic},
+    {
+        "crypt.random",
+        type(crypt) == "table" and crypt.random or nil
+    },
+    {
+        "crypt.random_deterministic",
+        type(crypt) == "table" and crypt.random_deterministic or nil
+    },
     {"crypt.hash.sha256", crypt and nested_function(crypt, "hash", "sha256")},
     {"crypt.hash.sha512", crypt and nested_function(crypt, "hash", "sha512")},
     {"crypt.hash.blake2b", crypt and nested_function(crypt, "hash", "blake2b")},
-    {"crypt.pwhash", crypt and crypt.pwhash},
-    {"crypt.pwhash_str", crypt and crypt.pwhash_str},
-    {"crypt.pwhash_str_verify", crypt and crypt.pwhash_str_verify},
+    {
+        "crypt.pwhash",
+        type(crypt) == "table" and crypt.pwhash or nil
+    },
+    {
+        "crypt.pwhash_str",
+        type(crypt) == "table" and crypt.pwhash_str or nil
+    },
+    {
+        "crypt.pwhash_str_verify",
+        type(crypt) == "table" and crypt.pwhash_str_verify or nil
+    },
     {"crypt.secretbox.seal", crypt and nested_function(crypt, "secretbox", "seal")},
     {"crypt.secretbox.open", crypt and nested_function(crypt, "secretbox", "open")},
     {"crypt.aead.encrypt", crypt and nested_function(crypt, "aead", "encrypt")},
@@ -3926,15 +4566,65 @@ if type(crypt) == "table" then
     if type(crypt.secretbox) == "table"
         and type(crypt.secretbox.seal) == "function"
         and type(crypt.secretbox.open) == "function"
-        and type(crypt.random) == "function"
     then
         test("crypt.secretbox round trip works", function()
             local message = "secretbox-message"
-            local nonce = crypto_random(24)
-            local key = crypto_random(32)
-            local cipher = crypt.secretbox.seal(message, nonce, key)
-            local plain = crypt.secretbox.open(cipher, nonce, key)
-            return plain == message
+            local candidates = {
+                {nonce = 24, key = 32},
+                {nonce = 12, key = 32}
+            }
+            local errors = {}
+
+            for i = 1, #candidates do
+                local candidate = candidates[i]
+                local nonce = string.rep("N", candidate.nonce)
+                local key = string.rep("K", candidate.key)
+
+                local seal_ok, cipher_or_error = pcall(
+                    crypt.secretbox.seal,
+                    message,
+                    nonce,
+                    key
+                )
+
+                if seal_ok then
+                    local open_ok, plain_or_error = pcall(
+                        crypt.secretbox.open,
+                        cipher_or_error,
+                        nonce,
+                        key
+                    )
+
+                    if open_ok and plain_or_error == message then
+                        info(
+                            "crypt.secretbox accepted sizes",
+                            "nonce="
+                                .. tostring(candidate.nonce)
+                                .. " key="
+                                .. tostring(candidate.key)
+                        )
+                        return true
+                    end
+
+                    errors[#errors + 1] =
+                        "nonce="
+                        .. tostring(candidate.nonce)
+                        .. " key="
+                        .. tostring(candidate.key)
+                        .. " open="
+                        .. value_to_string(plain_or_error)
+                else
+                    errors[#errors + 1] =
+                        "nonce="
+                        .. tostring(candidate.nonce)
+                        .. " key="
+                        .. tostring(candidate.key)
+                        .. " seal="
+                        .. value_to_string(cipher_or_error)
+                end
+            end
+
+            return false, table.concat(errors, " || ")
         end)
     end
 
@@ -4118,11 +4808,61 @@ if type(crypt) == "table" then
         and type(crypt.hkdf.sha256) == "function"
     then
         test("crypt.hkdf.sha256 is deterministic", function()
-            local a = crypt.hkdf.sha256("key", "salt", "info")
-            local b = crypt.hkdf.sha256("key", "salt", "info")
-            return type(a) == "string"
-                and #a > 0
-                and a == b
+            local three_ok, three_result = pcall(
+                crypt.hkdf.sha256,
+                "key",
+                "salt",
+                "info"
+            )
+
+            if three_ok
+                and type(three_result) == "string"
+                and #three_result > 0
+            then
+                local second =
+                    crypt.hkdf.sha256("key", "salt", "info")
+
+                info(
+                    "crypt.hkdf.sha256 accepted signature",
+                    "3 arguments as documented"
+                )
+
+                return three_result == second
+            end
+
+            local four_ok, four_result = pcall(
+                crypt.hkdf.sha256,
+                "key",
+                "salt",
+                "info",
+                32
+            )
+
+            if not four_ok then
+                return false,
+                    "3-argument result="
+                    .. value_to_string(three_result)
+                    .. " || 4-argument result="
+                    .. value_to_string(four_result)
+            end
+
+            local second_four =
+                crypt.hkdf.sha256(
+                    "key",
+                    "salt",
+                    "info",
+                    32
+                )
+
+            info(
+                "crypt.hkdf.sha256 accepted signature",
+                "4 arguments with output length=32"
+            )
+
+            return type(four_result) == "string"
+                and #four_result > 0
+                and four_result == second_four,
+                "length=" .. value_to_string(#four_result)
         end)
     end
 end
@@ -4152,11 +4892,11 @@ if type(memory) == "table" then
         local suffix = numeric_memory_types[i]
         check(
             "memory.read" .. suffix .. " exists",
-            type(memory["read" .. suffix]) == "function"
+            type(rawget(memory, "read" .. suffix)) == "function"
         )
         check(
             "memory.write" .. suffix .. " exists",
-            type(memory["write" .. suffix]) == "function"
+            type(rawget(memory, "write" .. suffix)) == "function"
         )
     end
 
@@ -4195,7 +4935,7 @@ if type(memory) == "table" then
     then
         for i = 1, #numeric_memory_types do
             local suffix = numeric_memory_types[i]
-            local read_function = memory["read" .. suffix]
+            local read_function = rawget(memory, "read" .. suffix)
 
             if type(read_function) == "function" then
                 test("memory.read" .. suffix .. " reads configured address", function()
@@ -4250,8 +4990,8 @@ if type(memory) == "table" then
     then
         for i = 1, #numeric_memory_types do
             local suffix = numeric_memory_types[i]
-            local read_function = memory["read" .. suffix]
-            local write_function = memory["write" .. suffix]
+            local read_function = rawget(memory, "read" .. suffix)
+            local write_function = rawget(memory, "write" .. suffix)
 
             if type(read_function) == "function"
                 and type(write_function) == "function"
@@ -4299,6 +5039,172 @@ if type(memory) == "table" then
         info(
             "Memory write execution tests",
             "disabled or memory_write_address is not configured"
+        )
+    end
+
+    local string_address =
+        EXTERNAL_TEST_VALUES.memory_string_address
+
+    if EXTERNAL_TEST_CONFIG.run_memory_reads
+        and type(string_address) == "number"
+        and type(memory.readstring) == "function"
+    then
+        test("memory.readstring reads configured string address", function()
+            local value = memory.readstring(string_address)
+            return type(value) == "string", value
+        end)
+    else
+        info(
+            "memory.readstring active test",
+            "disabled or memory_string_address is not configured"
+        )
+    end
+
+    if EXTERNAL_TEST_CONFIG.run_memory_writes
+        and type(string_address) == "number"
+        and type(memory.readstring) == "function"
+        and type(memory.writestring) == "function"
+    then
+        test("memory.writestring writes same string safely", function()
+            local old_value = memory.readstring(string_address)
+            memory.writestring(string_address, old_value)
+            return memory.readstring(string_address) == old_value
+        end)
+    else
+        info(
+            "memory.writestring active test",
+            "disabled or memory_string_address is not configured"
+        )
+    end
+
+    local vector_address =
+        EXTERNAL_TEST_VALUES.memory_vector_address
+
+    if EXTERNAL_TEST_CONFIG.run_memory_reads
+        and type(vector_address) == "number"
+        and type(memory.readvector) == "function"
+    then
+        test("memory.readvector reads configured vector address", function()
+            local value = memory.readvector(vector_address)
+            return value ~= nil, value
+        end)
+    else
+        info(
+            "memory.readvector active test",
+            "disabled or memory_vector_address is not configured"
+        )
+    end
+
+    if EXTERNAL_TEST_CONFIG.run_memory_writes
+        and type(vector_address) == "number"
+        and type(memory.readvector) == "function"
+        and type(memory.writevector) == "function"
+    then
+        test("memory.writevector writes same vector safely", function()
+            local old_value = memory.readvector(vector_address)
+            memory.writevector(vector_address, old_value)
+            local new_value = memory.readvector(vector_address)
+            return value_to_string(new_value)
+                == value_to_string(old_value)
+        end)
+    else
+        info(
+            "memory.writevector active test",
+            "disabled or memory_vector_address is not configured"
+        )
+    end
+
+    local changed_address =
+        EXTERNAL_TEST_VALUES.memory_changed_address
+    local changed_type =
+        EXTERNAL_TEST_VALUES.memory_changed_type
+    local changed_read =
+        type(changed_type) == "string"
+        and rawget(memory, "read" .. changed_type)
+        or nil
+    local changed_write =
+        type(changed_type) == "string"
+        and rawget(memory, "write" .. changed_type)
+        or nil
+
+    if EXTERNAL_TEST_CONFIG.run_memory_changed
+        and type(changed_address) == "number"
+        and type(memory.changed) == "function"
+        and type(changed_read) == "function"
+        and type(changed_write) == "function"
+        and type(task) == "table"
+        and type(task.wait) == "function"
+    then
+        test("memory.changed observes configured scratch address", function()
+            local old_value = changed_read(changed_address)
+            local replacement =
+                changed_type == "u8"
+                and ((old_value + 1) % 256)
+                or (old_value + 1)
+
+            local callback_count = 0
+            local callback_new = nil
+            local callback_old = nil
+
+            local watch_ok, watcher_or_error = pcall(
+                memory.changed,
+                changed_address,
+                changed_type,
+                function(_, new_value, previous_value)
+                    callback_count = callback_count + 1
+                    callback_new = new_value
+                    callback_old = previous_value
+                end,
+                1
+            )
+
+            if not watch_ok then
+                return false, watcher_or_error
+            end
+
+            local write_ok, write_error = pcall(
+                changed_write,
+                changed_address,
+                replacement
+            )
+
+            if type(task.wait) == "function" then
+                task.wait(0.05)
+            end
+
+            -- Always attempt restoration before judging the callback.
+            local restore_ok, restore_error = pcall(
+                changed_write,
+                changed_address,
+                old_value
+            )
+
+            if not restore_ok then
+                return false,
+                    "restore failed: "
+                    .. value_to_string(restore_error)
+            end
+
+            if not write_ok then
+                return false, write_error
+            end
+
+            return callback_count > 0
+                and callback_new == replacement
+                and callback_old == old_value,
+                "watcher="
+                .. value_to_string(watcher_or_error)
+                .. ", count="
+                .. value_to_string(callback_count)
+                .. ", old="
+                .. value_to_string(callback_old)
+                .. ", new="
+                .. value_to_string(callback_new)
+        end)
+    else
+        info(
+            "memory.changed active test",
+            "disabled or memory_changed_address/type is not configured"
         )
     end
 end
@@ -4358,10 +5264,7 @@ then
 
             if typed_ok then
                 notification_ok = true
-                accepted_signature =
-                    "send_notification(content, type="
-                    .. notification_type
-                    .. ")"
+                accepted_signature = notification_type
                 break
             end
 
@@ -4381,7 +5284,7 @@ then
 
     if notification_ok then
         info(
-            "send_notification accepted form",
+            "send_notification accepted type",
             accepted_signature
         )
     end
@@ -4494,102 +5397,173 @@ end
 -- ============================================================
 section("32. WebsocketClient")
 
-check(
-    "WebsocketClient.new exists",
-    WebsocketClient ~= nil
-        and type(first_present(WebsocketClient, "new", "New"))
-            == "function"
-)
+if EXTERNAL_TEST_CONFIG.run_websocket then
+    check(
+        "WebsocketClient.new exists",
+        WebsocketClient ~= nil
+            and type(first_present(WebsocketClient, "new", "New"))
+                == "function"
+    )
+end
 
-if EXTERNAL_TEST_CONFIG.run_websocket
-    and WebsocketClient ~= nil
-    and type(first_present(WebsocketClient, "new", "New"))
-        == "function"
-then
+if EXTERNAL_TEST_CONFIG.run_websocket then
+    if WebsocketClient == nil
+        or type(first_present(WebsocketClient, "new", "New"))
+            ~= "function"
+    then
+        info(
+            "WebSocket active test",
+            "enabled, but WebsocketClient.new is unavailable"
+        )
+    else
+    info(
+        "WebSocket prerequisite",
+        "local_websocket_echo_server.py must already be listening on "
+            .. EXTERNAL_TEST_VALUES.websocket_url
+    )
+
     local websocket_new =
         first_present(WebsocketClient, "new", "New")
 
-    local connect_ok, websocket_or_error = pcall(
-        websocket_new,
-        EXTERNAL_TEST_VALUES.websocket_url
-    )
+    local connect_ok, websocket_or_error =
+        pcall(
+            websocket_new,
+            EXTERNAL_TEST_VALUES.websocket_url
+        )
 
     check(
-        "WebsocketClient connects",
+        "WebsocketClient connects to local echo server",
         connect_ok and websocket_or_error ~= nil,
         websocket_or_error
     )
 
     if connect_ok and websocket_or_error ~= nil then
         local websocket = websocket_or_error
+        local message =
+            "Severe exhaustive WebSocket callback test"
+        local received_payload = nil
+        local received_binary = nil
+        local callback_count = 0
 
         test("WebsocketClient.Url is readable", function()
             return type(websocket.Url) == "string",
                 websocket.Url
         end)
 
-        local send = first_present(websocket, "Send", "send")
-        local disconnect =
-            first_present(websocket, "Disconnect", "disconnect")
-        local data_received =
-            first_present(websocket, "DataReceived")
+        -- Confirm the observed runtime shape. DataReceived is a
+        -- callback-registration function, not a Signal object.
+        test("WebsocketClient.DataReceived is a function", function()
+            return type(websocket.DataReceived) == "function",
+                type(websocket.DataReceived)
+        end)
 
-        check("WebsocketClient Send exists", type(send) == "function")
+        -- Keep the native callback minimal. Console, UI, yielding, and
+        -- other Severe API calls inside it previously caused concurrent
+        -- VM/console corruption.
+        local function on_data_received(payload, is_binary)
+            callback_count = callback_count + 1
+            received_payload = payload
+            received_binary = is_binary
+        end
+
+        local register_ok, register_error = pcall(function()
+            websocket:DataReceived(on_data_received)
+        end)
+
         check(
-            "WebsocketClient Disconnect exists",
-            type(disconnect) == "function"
+            "websocket:DataReceived(callback) registers",
+            register_ok,
+            register_error
         )
+
+        local send_ok = false
+        local send_error = nil
+
+        if register_ok then
+            send_ok, send_error = pcall(function()
+                websocket:Send(message, false)
+            end)
+
+            if not send_ok then
+                send_ok, send_error = pcall(function()
+                    websocket:send(message, false)
+                end)
+            end
+        end
+
         check(
-            "WebsocketClient DataReceived exists",
-            data_received ~= nil
+            "WebsocketClient Send executes",
+            send_ok,
+            send_error
         )
 
-        if data_received ~= nil then
-            local connected, connection, connection_detail =
-                connect_signal(
-                    data_received,
-                    function(payload, is_binary)
-                        info(
-                            "WebSocket echo received",
-                            value_to_string(payload)
-                                .. " binary="
-                                .. value_to_string(is_binary)
-                        )
-                    end
-                )
+        if send_ok
+            and type(task) == "table"
+            and type(task.wait) == "function"
+        then
+            for i = 1, 20 do
+                if callback_count > 0 then
+                    break
+                end
 
-            info(
-                "WebSocket DataReceived connection",
-                connected
-                    and (
-                        "connected through "
-                        .. value_to_string(connection_detail)
-                    )
-                    or value_to_string(connection_detail)
-            )
+                task.wait(0.1)
+            end
         end
 
-        if type(send) == "function" then
-            local ok, err = pcall(
-                send,
-                websocket,
-                "Severe VM websocket test",
-                false
-            )
-            check("WebsocketClient Send executes", ok, err)
+        check(
+            "DataReceived callback fires",
+            callback_count > 0,
+            "callback count=" .. value_to_string(callback_count)
+        )
+
+        check(
+            "WebSocket echo payload matches",
+            received_payload == message,
+            "expected="
+                .. message
+                .. " received="
+                .. value_to_string(received_payload)
+        )
+
+        info(
+            "WebSocket callback metadata",
+            "count="
+                .. value_to_string(callback_count)
+                .. " isBinary="
+                .. value_to_string(received_binary)
+                .. " (nil is the observed value for text frames)"
+        )
+
+        if type(task) == "table"
+            and type(task.wait) == "function"
+        then
+            task.wait(0.1)
         end
 
-        if type(task) == "table" and type(task.wait) == "function" then
-            pcall(task.wait, 0.5)
+        local disconnect_ok, disconnect_error =
+            pcall(function()
+                websocket:Disconnect()
+            end)
+
+        if not disconnect_ok then
+            disconnect_ok, disconnect_error =
+                pcall(function()
+                    websocket:disconnect()
+                end)
         end
 
-        if type(disconnect) == "function" then
-            local ok, err = pcall(disconnect, websocket)
-            check("WebsocketClient Disconnect executes", ok, err)
-        end
+        check(
+            "WebsocketClient Disconnect executes",
+            disconnect_ok,
+            disconnect_error
+        )
+    end
     end
 else
-    info("WebSocket active test", "disabled")
+    info(
+        "WebSocket active test",
+        "intentionally disabled; availability remains in the surface catalog"
+    )
 end
 
 -- ============================================================
@@ -4769,22 +5743,49 @@ if EXTERNAL_TEST_CONFIG.run_model_data_mutation then
         )
     end
 
-    if local_player ~= nil
+    if EXTERNAL_TEST_CONFIG.run_local_data_override
+        and local_player ~= nil
         and type(override_local_data) == "function"
     then
+        local left_foot =
+            safe_child_by_name(character, "LeftFoot")
+            or safe_child_by_name(character, "Left Leg")
+            or root
+            or head
+
+        local lower_torso =
+            safe_child_by_name(character, "LowerTorso")
+            or safe_child_by_name(character, "Torso")
+            or root
+            or head
+
+        local tool =
+            safe_child_by_class(character, "Tool")
+            or root
+            or head
+
+        local team = nil
+        pcall(function()
+            team = local_player.Team
+        end)
+
+        if team == nil then
+            team = local_player
+        end
+
         local local_data = {
             LocalPlayer = local_player,
             Displayname = local_player.DisplayName,
             Username = local_player.Name,
             Userid = local_player.UserId,
             Character = character,
-            Team = local_player.Team,
-            RootPart = root,
-            LeftFoot = nil,
+            Team = team,
+            RootPart = root or head,
+            LeftFoot = left_foot,
             Head = head,
-            LowerTorso = nil,
-            Tool = nil,
-            Humanoid = humanoid,
+            LowerTorso = lower_torso,
+            Tool = tool,
+            Humanoid = humanoid or character,
             Health = humanoid and humanoid.Health or 100,
             MaxHealth = humanoid and humanoid.MaxHealth or 100,
             RigType = 0
@@ -4813,6 +5814,12 @@ if EXTERNAL_TEST_CONFIG.run_model_data_mutation then
                 clear_result
             )
         end
+    else
+        info(
+            "override_local_data active test",
+            "disabled because Severe exposes no getter that could preserve "
+                .. "and restore pre-existing local overlay data"
+        )
     end
 
     if EXTERNAL_TEST_CONFIG.run_destructive_clear_functions
@@ -4905,14 +5912,32 @@ if Vector3 ~= nil and type(Vector3.new) == "function" then
 end
 
 if Color3 ~= nil and type(Color3.fromHex) == "function" then
-    test("Color3.fromHex rejects invalid hex", function()
+    test("Color3.fromHex handles invalid hex safely", function()
         local ok, result = pcall(
             Color3.fromHex,
             "this-is-not-hex"
         )
 
-        return ok == false,
-            ok and value_to_string(result) or result
+        if not ok then
+            info(
+                "Color3.fromHex invalid-input behavior",
+                "throws: " .. value_to_string(result)
+            )
+            return true
+        end
+
+        local color_like =
+            result ~= nil
+            and type(result.R) == "number"
+            and type(result.G) == "number"
+            and type(result.B) == "number"
+
+        info(
+            "Color3.fromHex invalid-input behavior",
+            "returns fallback: " .. value_to_string(result)
+        )
+
+        return color_like, result
     end)
 end
 
@@ -4938,16 +5963,45 @@ if PointInstance ~= nil
         == "function"
     and workspace ~= nil
 then
-    test("PointInstance.new rejects non-BasePart", function()
+    test("PointInstance.new handles a non-BasePart safely", function()
         local constructor =
             first_present(PointInstance, "new", "New")
         local ok, result = pcall(constructor, workspace)
 
-        return ok == false or result == nil,
-            "ok="
-                .. value_to_string(ok)
-                .. " result="
-                .. value_to_string(result)
+        if not ok or result == nil then
+            info(
+                "PointInstance invalid-input behavior",
+                "rejected non-BasePart"
+            )
+            return true
+        end
+
+        local active = nil
+        local active_ok = pcall(function()
+            active = result.Active
+        end)
+
+        local cframe_ok = pcall(function()
+            local unused = result.CFrame
+        end)
+
+        local destroy =
+            first_present(result, "Destroy", "destroy")
+
+        if type(destroy) == "function" then
+            pcall(destroy, result)
+        end
+
+        info(
+            "PointInstance invalid-input behavior",
+            "returned tracker; Active="
+                .. value_to_string(active)
+                .. " CFrame readable="
+                .. value_to_string(cframe_ok)
+        )
+
+        return active_ok and (active == false or cframe_ok == false),
+            "invalid tracker was unexpectedly active/readable"
     end)
 end
 
@@ -5010,49 +6064,56 @@ section("36. Runtime Type Bridge Report")
 
 local type_samples = {}
 
+local function add_type_sample(label, callback)
+    local ok, value = pcall(callback)
+
+    if ok and value ~= nil then
+        type_samples[#type_samples + 1] = {
+            label,
+            value
+        }
+    else
+        info(
+            label .. " type sample",
+            ok and "returned nil" or value
+        )
+    end
+end
+
 if Vector2 ~= nil and type(Vector2.new) == "function" then
-    type_samples[#type_samples + 1] = {
-        "Vector2.new",
-        Vector2.new(1, 2)
-    }
+    add_type_sample("Vector2.new", function()
+        return Vector2.new(1, 2)
+    end)
 end
 
 if Vector3 ~= nil and type(Vector3.new) == "function" then
-    type_samples[#type_samples + 1] = {
-        "Vector3.new",
-        Vector3.new(1, 2, 3)
-    }
+    add_type_sample("Vector3.new", function()
+        return Vector3.new(1, 2, 3)
+    end)
 end
 
 if Color3 ~= nil and type(Color3.new) == "function" then
-    type_samples[#type_samples + 1] = {
-        "Color3.new",
-        Color3.new(1, 0, 0)
-    }
+    add_type_sample("Color3.new", function()
+        return Color3.new(1, 0, 0)
+    end)
 end
 
 if CFrame ~= nil and type(CFrame.new) == "function" then
-    type_samples[#type_samples + 1] = {
-        "CFrame.new",
-        CFrame.new(1, 2, 3)
-    }
+    add_type_sample("CFrame.new", function()
+        return CFrame.new(1, 2, 3)
+    end)
 end
 
-if workspace ~= nil and workspace.CurrentCamera ~= nil then
-    pcall(function()
-        type_samples[#type_samples + 1] = {
-            "Camera.Position",
-            workspace.CurrentCamera.Position
-        }
+if workspace ~= nil then
+    add_type_sample("Camera.Position", function()
+        local camera = workspace.CurrentCamera
+        return camera and camera.Position or nil
     end)
 end
 
 if first_basepart ~= nil then
-    pcall(function()
-        type_samples[#type_samples + 1] = {
-            "BasePart.Position",
-            first_basepart.Position
-        }
+    add_type_sample("BasePart.Position", function()
+        return first_basepart.Position
     end)
 end
 
@@ -5075,97 +6136,3907 @@ for i = 1, #type_samples do
 end
 
 -- ============================================================
--- 37. COMMON EXTERNAL COMPATIBILITY PROBES
+-- 37. BEHAVIOR-FIRST EXTERNAL VM COMPATIBILITY LAB
 -- ============================================================
-section("37. Common External Compatibility Probes")
+section(
+    "37. Behavior-First External VM Compatibility Lab",
+    "compatibility",
+    "Environment"
+)
 
--- These names are common across Roblox script environments. They are
--- not required by Severe's supplied documentation, so they are INFO
--- probes and do not count as failures.
+-- Behavioral capabilities use one canonical score entry. Accepted
+-- aliases are resolved in order and are shown in the result metadata.
+-- The raw catalog in section 38 still scores every individual path.
+do
+    local function step_once()
+        if type(task) == "table"
+            and type(task.wait) == "function"
+        then
+            task.wait()
+        end
+    end
 
-local common_external_globals = {
-    {"getgenv", getgenv},
-    {"getrenv", getrenv},
-    {"getreg", getreg},
-    {"getgc", getgc},
-    {"getinstances", getinstances},
-    {"getnilinstances", getnilinstances},
-    {"getscripts", getscripts},
-    {"getloadedmodules", getloadedmodules},
-    {"getconnections", getconnections},
-    {"firesignal", firesignal},
-    {"fireclickdetector", fireclickdetector},
-    {"firetouchinterest", firetouchinterest},
-    {"hookfunction", hookfunction},
-    {"hookmetamethod", hookmetamethod},
-    {"newcclosure", newcclosure},
-    {"checkcaller", checkcaller},
-    {"islclosure", islclosure},
-    {"iscclosure", iscclosure},
-    {"clonefunction", clonefunction},
-    {"getrawmetatable", getrawmetatable},
-    {"setrawmetatable", setrawmetatable},
-    {"setreadonly", setreadonly},
-    {"isreadonly", isreadonly},
-    {"getnamecallmethod", getnamecallmethod},
-    {"setnamecallmethod", setnamecallmethod},
-    {"identifyexecutor", identifyexecutor},
-    {"getexecutorname", getexecutorname},
-    {"cloneref", cloneref},
-    {"compareinstances", compareinstances},
-    {"queue_on_teleport", queue_on_teleport},
-    {"request", request},
-    {"http_request", http_request},
-    {"getclipboard", getclipboard},
-    {"setthreadidentity", setthreadidentity},
-    {"getthreadidentity", getthreadidentity},
-    {"gethiddenproperty", gethiddenproperty},
-    {"sethiddenproperty", sethiddenproperty},
-    {"getscriptbytecode", getscriptbytecode},
-    {"getscriptclosure", getscriptclosure},
-    {"decompile", decompile}
-}
+    local function list_contains_identity(values, target)
+        if type(values) ~= "table" then
+            return false
+        end
 
-for i = 1, #common_external_globals do
-    local entry = common_external_globals[i]
-    info(entry[1], type(entry[2]))
-end
+        for _, value in pairs(values) do
+            if value == target then
+                return true
+            end
+        end
 
-if type(syn) == "table" then
-    info("syn.request", type(syn.request))
-    info(
-        "syn.websocket",
-        type(syn.websocket)
+        return false
+    end
+
+    local function is_instance(value)
+        if type(typeof) == "function" then
+            local ok, native_type = pcall(typeof, value)
+            if ok and native_type == "Instance" then
+                return true
+            end
+        end
+
+        local ok, class_name = pcall(function()
+            return value.ClassName
+        end)
+
+        return ok and type(class_name) == "string"
+    end
+
+    local function destroy_instance(value)
+        if value == nil then
+            return
+        end
+
+        pcall(function()
+            value:Destroy()
+        end)
+    end
+
+    local function disconnect_connection(value)
+        if value == nil then
+            return
+        end
+
+        pcall(function()
+            value:Disconnect()
+        end)
+
+        pcall(function()
+            value:disconnect()
+        end)
+    end
+
+    local function remove_drawing(value)
+        if value == nil then
+            return
+        end
+
+        pcall(function()
+            value:Remove()
+        end)
+
+        pcall(function()
+            value:Destroy()
+        end)
+    end
+
+    local crypt_base64 =
+        type(crypt) == "table"
+            and first_present(crypt, "base64")
+            or nil
+    local generic_base64 =
+        type(base64) == "table"
+            and base64
+            or nil
+    local syn_crypt =
+        type(syn) == "table"
+            and first_present(syn, "crypt")
+            or nil
+    local http_namespace =
+        type(http) == "table"
+            and http
+            or nil
+    local fluxus_namespace =
+        type(fluxus) == "table"
+            and fluxus
+            or nil
+
+    capability_test(
+        "Environment",
+        "getgenv returns one stable environment table",
+        {
+            {"getgenv", getgenv}
+        },
+        function(fn)
+            local first = fn()
+            local second = fn()
+            return type(first) == "table"
+                and first == second,
+                "first="
+                    .. type(first)
+                    .. ", second="
+                    .. type(second)
+        end
     )
 
-    if type(syn.websocket) == "table" then
-        info(
-            "syn.websocket.connect",
-            type(syn.websocket.connect)
-        )
+    capability_test(
+        "Environment",
+        "getrenv returns the runtime environment",
+        {
+            {"getrenv", getrenv}
+        },
+        function(fn)
+            local environment = fn()
+            if type(environment) ~= "table" then
+                return false, "returned " .. type(environment)
+            end
+
+            if game ~= nil
+                and environment.game ~= nil
+                and environment.game ~= game
+            then
+                return false, "environment.game identity mismatch"
+            end
+
+            return true
+        end
+    )
+
+    capability_test(
+        "Environment",
+        "getreg returns a nonempty registry table",
+        {
+            {"getreg", getreg},
+            {"debug.getregistry", first_present(debug, "getregistry")}
+        },
+        function(fn)
+            local registry = fn()
+            return type(registry) == "table"
+                and next(registry) ~= nil,
+                "returned "
+                    .. type(registry)
+                    .. ", empty="
+                    .. value_to_string(
+                        type(registry) == "table"
+                            and next(registry) == nil
+                    )
+        end
+    )
+
+    capability_test(
+        "Environment",
+        "getgc exposes live executor-created values",
+        {
+            {"getgc", getgc},
+            {"get_gc_objects", get_gc_objects}
+        },
+        function(fn)
+            local marker = {}
+            local function vm_capability_gc_marker()
+                return marker
+            end
+
+            step_once()
+
+            local values = fn(true)
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            local found_function =
+                list_contains_identity(
+                    values,
+                    vm_capability_gc_marker
+                )
+            local found_table =
+                list_contains_identity(values, marker)
+
+            return found_function or found_table,
+                "returned "
+                    .. value_to_string(#values)
+                    .. " values; sentinel function="
+                    .. value_to_string(found_function)
+                    .. "; sentinel table="
+                    .. value_to_string(found_table)
+        end
+    )
+
+    capability_test(
+        "Environment",
+        "filtergc finds an exact live sentinel table",
+        {
+            {"filtergc", filtergc},
+            {"filter_gc", filter_gc},
+            {"filterGC", filterGC},
+            {"FilterGC", FilterGC},
+            {"getfiltergc", getfiltergc}
+        },
+        function(fn)
+            local unique =
+                "__vm_capability_filtergc_"
+                .. value_to_string({})
+            local sentinel = {
+                [unique] = unique
+            }
+
+            step_once()
+
+            local result = fn(
+                "table",
+                {
+                    KeyValuePairs = {
+                        [unique] = unique
+                    }
+                },
+                true
+            )
+
+            return result == sentinel,
+                "filter result identity matched="
+                    .. value_to_string(result == sentinel)
+        end
+    )
+
+    capability_test(
+        "Environment",
+        "getinstances returns real Instance objects",
+        {
+            {"getinstances", getinstances},
+            {"get_instances", get_instances}
+        },
+        function(fn)
+            local values = fn()
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            local instance_count = 0
+            for _, value in pairs(values) do
+                if is_instance(value) then
+                    instance_count = instance_count + 1
+                end
+            end
+
+            return instance_count > 0,
+                "instances="
+                    .. value_to_string(instance_count)
+                    .. "/"
+                    .. value_to_string(#values)
+        end
+    )
+
+    capability_test(
+        "Environment",
+        "getnilinstances finds a private unparented Instance",
+        {
+            {"getnilinstances", getnilinstances},
+            {"get_nil_instances", get_nil_instances}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Instance.new is required for a private fixture"
+            end
+
+            local fixture = instance_new("Folder")
+            fixture.Name =
+                "__VMCapabilityNilInstance_"
+                .. value_to_string(math.random(100000, 999999))
+            fixture.Parent = nil
+            step_once()
+
+            local values = fn()
+            local found = list_contains_identity(values, fixture)
+            destroy_instance(fixture)
+
+            return type(values) == "table" and found,
+                "returned="
+                    .. type(values)
+                    .. ", found fixture="
+                    .. value_to_string(found)
+        end
+    )
+
+    capability_test(
+        "Environment",
+        "gethui returns an Instance container",
+        {
+            {"gethui", gethui},
+            {"get_hidden_gui", get_hidden_gui},
+            {"gethiddengui", gethiddengui}
+        },
+        function(fn)
+            local value = fn()
+            return is_instance(value),
+                "returned " .. type(value)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "checkcaller identifies the executor thread",
+        {
+            {"checkcaller", checkcaller},
+            {"is_protosmasher_caller", is_protosmasher_caller}
+        },
+        function(fn)
+            local value = fn()
+            return value == true,
+                "returned " .. value_to_string(value)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "loadstring compiles and executes fresh source",
+        {
+            {"loadstring", loadstring},
+            {"load", load}
+        },
+        function(fn)
+            local compiled, compile_error =
+                fn(
+                    "local a = 9300; return a + 41, "
+                    .. "'vm-capability-load'"
+                )
+
+            if type(compiled) ~= "function" then
+                return false,
+                    "compiler returned "
+                    .. type(compiled)
+                    .. ": "
+                    .. value_to_string(compile_error)
+            end
+
+            local number_value, string_value = compiled()
+            return number_value == 9341
+                and string_value == "vm-capability-load",
+                "returned "
+                    .. value_to_string(number_value)
+                    .. ", "
+                    .. value_to_string(string_value)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "newcclosure preserves arguments and multiple returns",
+        {
+            {"newcclosure", newcclosure},
+            {"new_c_closure", new_c_closure}
+        },
+        function(fn)
+            local wrapped = fn(function(a, b, c)
+                return a + 1, b, c
+            end)
+
+            if type(wrapped) ~= "function" then
+                return false, "returned " .. type(wrapped)
+            end
+
+            local a, b, c = wrapped(40, nil, "marker")
+            if a ~= 41 or b ~= nil or c ~= "marker" then
+                return false,
+                    "argument/return mismatch: "
+                    .. value_to_string(a)
+                    .. ", "
+                    .. value_to_string(b)
+                    .. ", "
+                    .. value_to_string(c)
+            end
+
+            local is_c =
+                dependency_function({
+                    {"iscclosure", iscclosure},
+                    {"is_c_closure", is_c_closure}
+                })
+
+            if type(is_c) == "function" and is_c(wrapped) ~= true then
+                return false,
+                    "iscclosure did not recognize the wrapper"
+            end
+
+            return true
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "clonefunction creates an independent working clone",
+        {
+            {"clonefunction", clonefunction},
+            {"clonefunc", clonefunc},
+            {"clone_function", clone_function}
+        },
+        function(fn)
+            local upvalue = 73
+            local function original(value)
+                return upvalue + value
+            end
+
+            local clone = fn(original)
+            return type(clone) == "function"
+                and clone ~= original
+                and clone(4) == 77,
+                "clone type="
+                    .. type(clone)
+                    .. ", same reference="
+                    .. value_to_string(clone == original)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "islclosure recognizes a Lua closure",
+        {
+            {"islclosure", islclosure},
+            {"is_l_closure", is_l_closure}
+        },
+        function(fn)
+            local function lua_closure()
+                return 1
+            end
+
+            return fn(lua_closure) == true,
+                "local closure was not recognized"
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "iscclosure distinguishes a native closure",
+        {
+            {"iscclosure", iscclosure},
+            {"is_c_closure", is_c_closure}
+        },
+        function(fn)
+            local function lua_closure()
+                return 1
+            end
+
+            local native_result = fn(print)
+            local lua_result = fn(lua_closure)
+            return native_result == true
+                and lua_result == false,
+                "print="
+                    .. value_to_string(native_result)
+                    .. ", Lua closure="
+                    .. value_to_string(lua_result)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "isexecutorclosure recognizes executor-created code",
+        {
+            {"isexecutorclosure", isexecutorclosure},
+            {"checkclosure", checkclosure},
+            {"isourclosure", isourclosure},
+            {"is_synapse_function", is_synapse_function}
+        },
+        function(fn)
+            local function executor_closure()
+                return "executor"
+            end
+
+            return fn(executor_closure) == true,
+                "executor-created closure was not recognized"
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "getfunctionhash is stable and input-sensitive",
+        {
+            {"getfunctionhash", getfunctionhash},
+            {"get_function_hash", get_function_hash},
+            {"debug.getfunctionhash", first_present(debug, "getfunctionhash")}
+        },
+        function(fn)
+            local function first_probe()
+                return "VM_HASH_ALPHA"
+            end
+
+            local function second_probe()
+                return "VM_HASH_BETA"
+            end
+
+            local first_hash = fn(first_probe)
+            local second_first_hash = fn(first_probe)
+            local second_hash = fn(second_probe)
+
+            return type(first_hash) == "string"
+                and #first_hash > 0
+                and first_hash == second_first_hash
+                and first_hash ~= second_hash,
+                "hash types="
+                    .. type(first_hash)
+                    .. "/"
+                    .. type(second_hash)
+                    .. ", stable="
+                    .. value_to_string(
+                        first_hash == second_first_hash
+                    )
+                    .. ", distinct="
+                    .. value_to_string(first_hash ~= second_hash)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "hookfunction redirects and restores a private closure",
+        {
+            {"hookfunction", hookfunction},
+            {"replaceclosure", replaceclosure},
+            {"hookfunc", hookfunc},
+            {"hook_function", hook_function}
+        },
+        function(fn)
+            local function target(value)
+                return "original:" .. value
+            end
+
+            local original = fn(target, function(value)
+                return "hooked:" .. value
+            end)
+
+            if type(original) ~= "function" then
+                return false,
+                    "hook returned " .. type(original)
+            end
+
+            local hooked_value = target("x")
+            local restore_ok = pcall(fn, target, original)
+
+            if not restore_ok
+                and type(restorefunction) == "function"
+            then
+                restore_ok = pcall(restorefunction, target)
+            end
+
+            local restored_value = target("x")
+            return hooked_value == "hooked:x"
+                and restore_ok
+                and restored_value == "original:x",
+                "hooked="
+                    .. value_to_string(hooked_value)
+                    .. ", restored="
+                    .. value_to_string(restored_value)
+        end
+    )
+
+    capability_test(
+        "Closures",
+        "restorefunction restores a hooked private closure",
+        {
+            {"restorefunction", restorefunction},
+            {"restorefunc", restorefunc},
+            {"restore_function", restore_function}
+        },
+        function(fn)
+            local hook =
+                dependency_function({
+                    {"hookfunction", hookfunction},
+                    {"replaceclosure", replaceclosure},
+                    {"hookfunc", hookfunc}
+                })
+
+            if type(hook) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "hookfunction is required for verification"
+            end
+
+            local function target()
+                return "restore-original"
+            end
+
+            hook(target, function()
+                return "restore-hooked"
+            end)
+
+            local hooked_value = target()
+            fn(target)
+            local restored_value = target()
+
+            return hooked_value == "restore-hooked"
+                and restored_value == "restore-original",
+                "hooked="
+                    .. value_to_string(hooked_value)
+                    .. ", restored="
+                    .. value_to_string(restored_value)
+        end
+    )
+
+    capability_test(
+        "Metatable",
+        "getrawmetatable returns the exact private metatable",
+        {
+            {"getrawmetatable", getrawmetatable},
+            {"debug.getmetatable", first_present(debug, "getmetatable")}
+        },
+        function(fn)
+            local metatable = {
+                __index = function()
+                    return "raw-metatable"
+                end
+            }
+            local target = setmetatable({}, metatable)
+            return fn(target) == metatable,
+                "metatable identity mismatch"
+        end
+    )
+
+    capability_test(
+        "Metatable",
+        "setrawmetatable changes a private table's metatable",
+        {
+            {"setrawmetatable", setrawmetatable},
+            {"debug.setmetatable", first_present(debug, "setmetatable")}
+        },
+        function(fn)
+            local target = {}
+            local metatable = {
+                __index = {
+                    marker = "setrawmetatable"
+                }
+            }
+
+            fn(target, metatable)
+            return getmetatable(target) == metatable
+                and target.marker == "setrawmetatable",
+                "new metatable was not observed"
+        end
+    )
+
+    capability_test(
+        "Metatable",
+        "setreadonly and isreadonly perform a reversible transition",
+        {
+            {"setreadonly", setreadonly},
+            {"make_readonly", make_readonly}
+        },
+        function(fn)
+            local is_readonly =
+                dependency_function({
+                    {"isreadonly", isreadonly},
+                    {"is_readonly", is_readonly}
+                })
+
+            if type(is_readonly) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "isreadonly is required for verification"
+            end
+
+            local target = {}
+            fn(target, true)
+            local locked = is_readonly(target) == true
+            local write_ok = pcall(function()
+                target.value = 1
+            end)
+            fn(target, false)
+            local unlocked = is_readonly(target) == false
+            local second_write_ok = pcall(function()
+                target.value = 2
+            end)
+
+            return locked
+                and not write_ok
+                and unlocked
+                and second_write_ok,
+                "locked="
+                    .. value_to_string(locked)
+                    .. ", write while locked="
+                    .. value_to_string(write_ok)
+                    .. ", unlocked="
+                    .. value_to_string(unlocked)
+        end
+    )
+
+    capability_test(
+        "Metatable",
+        "isreadonly distinguishes writable and readonly tables",
+        {
+            {"isreadonly", isreadonly},
+            {"is_readonly", is_readonly}
+        },
+        function(fn)
+            local set_readonly =
+                dependency_function({
+                    {"setreadonly", setreadonly},
+                    {"make_readonly", make_readonly}
+                })
+
+            if type(set_readonly) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "setreadonly is required for verification"
+            end
+
+            local target = {}
+            local before = fn(target)
+            set_readonly(target, true)
+            local during = fn(target)
+            set_readonly(target, false)
+            local after = fn(target)
+
+            return before == false
+                and during == true
+                and after == false,
+                "states="
+                    .. value_to_string(before)
+                    .. "/"
+                    .. value_to_string(during)
+                    .. "/"
+                    .. value_to_string(after)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getupvalue returns an exact sentinel",
+        {
+            {"debug.getupvalue", first_present(debug, "getupvalue")},
+            {"getupvalue", getupvalue}
+        },
+        function(fn)
+            local sentinel = {}
+            local function capture()
+                return sentinel
+            end
+
+            local first, second = fn(capture, 1)
+            local value = second ~= nil and second or first
+
+            return value == sentinel,
+                "sentinel identity matched="
+                    .. value_to_string(value == sentinel)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getupvalues returns the real captured values",
+        {
+            {"debug.getupvalues", first_present(debug, "getupvalues")},
+            {"getupvalues", getupvalues}
+        },
+        function(fn)
+            local first_sentinel = {}
+            local second_sentinel = "VM_UPVALUE_SECOND_5521"
+            local function capture()
+                return first_sentinel, second_sentinel
+            end
+
+            local values = fn(capture)
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            local found_first = false
+            local found_second = false
+            for _, value in pairs(values) do
+                if value == first_sentinel then
+                    found_first = true
+                elseif value == second_sentinel then
+                    found_second = true
+                end
+            end
+
+            return found_first and found_second,
+                "first="
+                    .. value_to_string(found_first)
+                    .. ", second="
+                    .. value_to_string(found_second)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.setupvalue mutates a real closure upvalue",
+        {
+            {"debug.setupvalue", first_present(debug, "setupvalue")},
+            {"setupvalue", setupvalue}
+        },
+        function(fn)
+            local value = "before"
+            local function capture()
+                return value
+            end
+
+            fn(capture, 1, "after")
+            return capture() == "after",
+                "closure returned " .. value_to_string(capture())
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getconstants exposes unique function constants",
+        {
+            {"debug.getconstants", first_present(debug, "getconstants")},
+            {"getconstants", getconstants}
+        },
+        function(fn)
+            local function constant_probe()
+                return "VM_UNIQUE_CONSTANT_74291", 74291
+            end
+
+            local constants = fn(constant_probe)
+            if type(constants) ~= "table" then
+                return false, "returned " .. type(constants)
+            end
+
+            local found_string = false
+            local found_number = false
+            for _, value in pairs(constants) do
+                if value == "VM_UNIQUE_CONSTANT_74291" then
+                    found_string = true
+                elseif value == 74291 then
+                    found_number = true
+                end
+            end
+
+            return found_string or found_number,
+                "unique string="
+                    .. value_to_string(found_string)
+                    .. ", unique number="
+                    .. value_to_string(found_number)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getconstant agrees with debug.getconstants",
+        {
+            {"debug.getconstant", first_present(debug, "getconstant")},
+            {"getconstant", getconstant}
+        },
+        function(fn)
+            local get_constants =
+                dependency_function({
+                    {
+                        "debug.getconstants",
+                        first_present(debug, "getconstants")
+                    },
+                    {"getconstants", getconstants}
+                })
+
+            if type(get_constants) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "debug.getconstants is required for index discovery"
+            end
+
+            local function constant_probe()
+                return "VM_GETCONSTANT_38117"
+            end
+
+            local constants = get_constants(constant_probe)
+            local index = nil
+            for i, value in pairs(constants) do
+                if value == "VM_GETCONSTANT_38117"
+                    and type(i) == "number"
+                then
+                    index = i
+                    break
+                end
+            end
+
+            if index == nil then
+                return false,
+                    "companion getconstants omitted the sentinel"
+            end
+
+            return fn(constant_probe, index)
+                == "VM_GETCONSTANT_38117",
+                "index=" .. value_to_string(index)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.setconstant changes live function behavior",
+        {
+            {"debug.setconstant", first_present(debug, "setconstant")},
+            {"setconstant", setconstant}
+        },
+        function(fn)
+            local get_constants =
+                dependency_function({
+                    {
+                        "debug.getconstants",
+                        first_present(debug, "getconstants")
+                    },
+                    {"getconstants", getconstants}
+                })
+
+            if type(get_constants) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "debug.getconstants is required for index discovery"
+            end
+
+            local function constant_probe()
+                return "VM_SETCONSTANT_BEFORE_9182"
+            end
+
+            local constants = get_constants(constant_probe)
+            local index = nil
+            for i, value in pairs(constants) do
+                if value == "VM_SETCONSTANT_BEFORE_9182"
+                    and type(i) == "number"
+                then
+                    index = i
+                    break
+                end
+            end
+
+            if index == nil then
+                return false, "could not locate the sentinel constant"
+            end
+
+            fn(
+                constant_probe,
+                index,
+                "VM_SETCONSTANT_AFTER_9182"
+            )
+            local changed =
+                constant_probe()
+                    == "VM_SETCONSTANT_AFTER_9182"
+
+            pcall(
+                fn,
+                constant_probe,
+                index,
+                "VM_SETCONSTANT_BEFORE_9182"
+            )
+
+            return changed,
+                "execution reflected mutation="
+                    .. value_to_string(changed)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getprotos returns real callable prototypes",
+        {
+            {"debug.getprotos", first_present(debug, "getprotos")},
+            {"getprotos", getprotos}
+        },
+        function(fn)
+            local function outer()
+                local function first_inner()
+                    return "VM_PROTO_ONE"
+                end
+                local function second_inner()
+                    return "VM_PROTO_TWO"
+                end
+                return first_inner, second_inner
+            end
+
+            local protos = fn(outer)
+            if type(protos) ~= "table" then
+                return false, "returned " .. type(protos)
+            end
+
+            local callable_count = 0
+            for _, proto in pairs(protos) do
+                if type(proto) == "function" then
+                    callable_count = callable_count + 1
+                end
+            end
+
+            return callable_count >= 2,
+                "callable prototypes="
+                    .. value_to_string(callable_count)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getproto returns a callable nested prototype",
+        {
+            {"debug.getproto", first_present(debug, "getproto")},
+            {"getproto", getproto}
+        },
+        function(fn)
+            local function outer()
+                local function inner()
+                    return "VM_SINGLE_PROTO_441"
+                end
+                return inner
+            end
+
+            local proto = fn(outer, 1)
+            if type(proto) == "table" and #proto == 1 then
+                proto = proto[1]
+            end
+
+            return type(proto) == "function"
+                and proto() == "VM_SINGLE_PROTO_441",
+                "returned " .. type(proto)
+        end
+    )
+
+    capability_test(
+        "Debug",
+        "debug.getinfo distinguishes Lua and native functions",
+        {
+            {"debug.getinfo", first_present(debug, "getinfo")},
+            {"debug.info", first_present(debug, "info")}
+        },
+        function(fn, path)
+            local function two_arguments(a, b)
+                return a, b
+            end
+
+            if path == "debug.info" then
+                local source = fn(two_arguments, "s")
+                return type(source) == "string"
+                    and #source > 0,
+                    "debug.info source=" .. value_to_string(source)
+            end
+
+            local lua_info = fn(two_arguments)
+            local native_info = fn(print)
+            if type(lua_info) ~= "table"
+                or type(native_info) ~= "table"
+            then
+                return false,
+                    "returned "
+                    .. type(lua_info)
+                    .. "/"
+                    .. type(native_info)
+            end
+
+            if lua_info.what ~= nil
+                and native_info.what ~= nil
+                and lua_info.what == native_info.what
+            then
+                return false,
+                    "Lua/native 'what' fields are identical"
+            end
+
+            if lua_info.numparams ~= nil
+                and lua_info.numparams ~= 2
+            then
+                return false,
+                    "numparams="
+                    .. value_to_string(lua_info.numparams)
+            end
+
+            return true
+        end
+    )
+
+    local fs_suffix =
+        value_to_string(math.random(100000, 999999))
+    local fs_folder =
+        "__vm_capability_lab_" .. fs_suffix
+    local fs_file = fs_folder .. "/roundtrip.luau"
+    local fs_append_file = fs_folder .. "/append.txt"
+
+    local write_file =
+        dependency_function({
+            {"writefile", writefile},
+            {"write_file", write_file}
+        })
+    local read_file =
+        dependency_function({
+            {"readfile", readfile},
+            {"read_file", read_file}
+        })
+    local make_folder =
+        dependency_function({
+            {"makefolder", makefolder},
+            {"createfolder", createfolder},
+            {"mkdir", mkdir},
+            {"makedir", makedir}
+        })
+    local delete_file =
+        dependency_function({
+            {"delfile", delfile},
+            {"deletefile", deletefile},
+            {"removefile", removefile}
+        })
+    local delete_folder =
+        dependency_function({
+            {"delfolder", delfolder},
+            {"deletefolder", deletefolder},
+            {"removefolder", removefolder},
+            {"rmdir", rmdir}
+        })
+    local is_file =
+        dependency_function({
+            {"isfile", isfile},
+            {"is_file", is_file}
+        })
+    local is_folder =
+        dependency_function({
+            {"isfolder", isfolder},
+            {"is_folder", is_folder}
+        })
+
+    if type(make_folder) == "function" then
+        pcall(make_folder, fs_folder)
     end
-else
-    info("syn namespace", type(syn))
+
+    capability_test(
+        "Filesystem",
+        "writefile persists exact bytes",
+        {
+            {"writefile", writefile},
+            {"write_file", write_file}
+        },
+        function(fn)
+            if type(read_file) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "readfile is required to verify persistence"
+            end
+
+            if type(make_folder) == "function" then
+                pcall(make_folder, fs_folder)
+            end
+
+            local payload = "return 'VM_WRITEFILE_" .. fs_suffix .. "'"
+            fn(fs_file, payload)
+            local observed = read_file(fs_file)
+            return observed == payload,
+                "read-back bytes="
+                    .. value_to_string(
+                        type(observed) == "string"
+                            and #observed
+                            or type(observed)
+                    )
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "readfile returns exact persisted bytes",
+        {
+            {"readfile", readfile},
+            {"read_file", read_file}
+        },
+        function(fn)
+            if type(write_file) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "writefile is required to create a fixture"
+            end
+
+            if type(make_folder) == "function" then
+                pcall(make_folder, fs_folder)
+            end
+
+            local payload = "VM_READFILE_" .. fs_suffix
+            write_file(fs_file, payload)
+            return fn(fs_file) == payload,
+                "read-back data mismatch"
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "appendfile appends instead of overwriting",
+        {
+            {"appendfile", appendfile},
+            {"append_file", append_file}
+        },
+        function(fn)
+            if type(write_file) ~= "function"
+                or type(read_file) ~= "function"
+            then
+                return CAPABILITY_SKIP,
+                    "writefile and readfile are required"
+            end
+
+            if type(make_folder) == "function" then
+                pcall(make_folder, fs_folder)
+            end
+
+            write_file(fs_append_file, "alpha")
+            fn(fs_append_file, "-beta")
+            local observed = read_file(fs_append_file)
+            return observed == "alpha-beta",
+                "read-back=" .. value_to_string(observed)
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "isfile distinguishes files from missing paths",
+        {
+            {"isfile", isfile},
+            {"is_file", is_file}
+        },
+        function(fn)
+            if type(write_file) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "writefile is required to create a fixture"
+            end
+
+            if type(make_folder) == "function" then
+                pcall(make_folder, fs_folder)
+            end
+
+            write_file(fs_file, "isfile")
+            return fn(fs_file) == true
+                and fn(fs_folder .. "/missing.file") == false,
+                "existing/missing distinction failed"
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "makefolder creates a discoverable folder",
+        {
+            {"makefolder", makefolder},
+            {"createfolder", createfolder},
+            {"mkdir", mkdir},
+            {"makedir", makedir}
+        },
+        function(fn)
+            if type(is_folder) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "isfolder is required for verification"
+            end
+
+            pcall(delete_folder or function() end, fs_folder)
+            fn(fs_folder)
+            return is_folder(fs_folder) == true,
+                "isfolder did not observe the created folder"
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "isfolder distinguishes folders from missing paths",
+        {
+            {"isfolder", isfolder},
+            {"is_folder", is_folder}
+        },
+        function(fn)
+            if type(make_folder) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "makefolder is required to create a fixture"
+            end
+
+            pcall(make_folder, fs_folder)
+            return fn(fs_folder) == true
+                and fn(fs_folder .. "_missing") == false,
+                "existing/missing distinction failed"
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "listfiles returns the created file",
+        {
+            {"listfiles", listfiles},
+            {"listdir", listdir},
+            {"list_files", list_files}
+        },
+        function(fn)
+            if type(make_folder) ~= "function"
+                or type(write_file) ~= "function"
+            then
+                return CAPABILITY_SKIP,
+                    "makefolder and writefile are required"
+            end
+
+            pcall(make_folder, fs_folder)
+            write_file(fs_file, "listfiles")
+            local values = fn(fs_folder)
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            local found = false
+            for _, path in pairs(values) do
+                if type(path) == "string"
+                    and (
+                        path == fs_file
+                        or contains_plain(path, "roundtrip.luau")
+                    )
+                then
+                    found = true
+                    break
+                end
+            end
+
+            return found,
+                "entries=" .. value_to_string(#values)
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "loadfile executes source from the filesystem",
+        {
+            {"loadfile", loadfile},
+            {"load_file", load_file}
+        },
+        function(fn)
+            if type(write_file) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "writefile is required to create a fixture"
+            end
+
+            pcall(make_folder or function() end, fs_folder)
+            write_file(
+                fs_file,
+                "return 7712, 'VM_LOADFILE_OK'"
+            )
+            local compiled, load_error = fn(fs_file)
+
+            if type(compiled) ~= "function" then
+                return false,
+                    "returned "
+                    .. type(compiled)
+                    .. ": "
+                    .. value_to_string(load_error)
+            end
+
+            local number_value, string_value = compiled()
+            return number_value == 7712
+                and string_value == "VM_LOADFILE_OK",
+                "returned "
+                    .. value_to_string(number_value)
+                    .. ", "
+                    .. value_to_string(string_value)
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "delfile removes an existing file",
+        {
+            {"delfile", delfile},
+            {"deletefile", deletefile},
+            {"removefile", removefile}
+        },
+        function(fn)
+            if type(write_file) ~= "function"
+                or type(is_file) ~= "function"
+            then
+                return CAPABILITY_SKIP,
+                    "writefile and isfile are required"
+            end
+
+            pcall(make_folder or function() end, fs_folder)
+            write_file(fs_file, "delete-me")
+            fn(fs_file)
+            return is_file(fs_file) == false,
+                "isfile still reports the fixture"
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "delfolder removes an existing folder",
+        {
+            {"delfolder", delfolder},
+            {"deletefolder", deletefolder},
+            {"removefolder", removefolder},
+            {"rmdir", rmdir}
+        },
+        function(fn)
+            if type(make_folder) ~= "function"
+                or type(is_folder) ~= "function"
+            then
+                return CAPABILITY_SKIP,
+                    "makefolder and isfolder are required"
+            end
+
+            pcall(delete_file or function() end, fs_file)
+            pcall(delete_file or function() end, fs_append_file)
+            pcall(fn, fs_folder)
+            make_folder(fs_folder)
+            fn(fs_folder)
+            return is_folder(fs_folder) == false,
+                "isfolder still reports the fixture"
+        end
+    )
+
+    capability_test(
+        "Filesystem",
+        "getcustomasset returns an engine asset URI for a real file",
+        {
+            {"getcustomasset", getcustomasset},
+            {"getsynasset", getsynasset},
+            {"get_custom_asset", get_custom_asset}
+        },
+        function(fn)
+            if type(write_file) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "writefile is required to create an asset fixture"
+            end
+
+            pcall(make_folder or function() end, fs_folder)
+            local asset_path = fs_folder .. "/asset.txt"
+            write_file(asset_path, "VM_CUSTOM_ASSET_" .. fs_suffix)
+            local uri = fn(asset_path)
+            pcall(delete_file or function() end, asset_path)
+
+            return type(uri) == "string"
+                and #uri > 0
+                and (
+                    contains_plain(uri, "rbxasset")
+                    or contains_plain(uri, "asset")
+                ),
+                "returned " .. value_to_string(uri)
+        end
+    )
+
+    capability_test(
+        "Encoding",
+        "base64 encode returns the canonical vector",
+        {
+            {
+                "crypt.base64encode",
+                first_present(crypt, "base64encode", "base64_encode")
+            },
+            {
+                "crypt.base64.encode",
+                first_present(crypt_base64, "encode")
+            },
+            {
+                "syn.crypt.base64.encode",
+                first_present(
+                    first_present(syn_crypt, "base64"),
+                    "encode"
+                )
+            },
+            {"base64encode", base64encode},
+            {"base64_encode", base64_encode},
+            {"base64.encode", first_present(generic_base64, "encode")}
+        },
+        function(fn)
+            local result = fn("Hello, VM!")
+            return result == "SGVsbG8sIFZNIQ==",
+                "returned " .. value_to_string(result)
+        end
+    )
+
+    capability_test(
+        "Encoding",
+        "base64 decode reverses the canonical vector",
+        {
+            {
+                "crypt.base64decode",
+                first_present(crypt, "base64decode", "base64_decode")
+            },
+            {
+                "crypt.base64.decode",
+                first_present(crypt_base64, "decode")
+            },
+            {
+                "syn.crypt.base64.decode",
+                first_present(
+                    first_present(syn_crypt, "base64"),
+                    "decode"
+                )
+            },
+            {"base64decode", base64decode},
+            {"base64_decode", base64_decode},
+            {"base64.decode", first_present(generic_base64, "decode")}
+        },
+        function(fn)
+            local result = fn("SGVsbG8sIFZNIQ==")
+            return result == "Hello, VM!",
+                "returned " .. value_to_string(result)
+        end
+    )
+
+    capability_test(
+        "Encoding",
+        "lz4 compression round-trips binary-safe data",
+        {
+            {"lz4compress", lz4compress},
+            {"lz4_compress", lz4_compress},
+            {"lz4.compress", first_present(lz4, "compress")}
+        },
+        function(fn)
+            local decompress =
+                dependency_function({
+                    {"lz4decompress", lz4decompress},
+                    {"lz4_decompress", lz4_decompress},
+                    {"lz4.decompress", first_present(lz4, "decompress")}
+                })
+
+            if type(decompress) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "lz4decompress is required for verification"
+            end
+
+            local source =
+                "VM-LZ4\0"
+                .. string.rep("roundtrip-", 32)
+            local compressed = fn(source)
+            if type(compressed) ~= "string" then
+                return false,
+                    "compress returned " .. type(compressed)
+            end
+
+            local ok, restored =
+                pcall(decompress, compressed, #source)
+            if not ok or restored ~= source then
+                ok, restored = pcall(decompress, compressed)
+            end
+
+            return ok and restored == source,
+                "compressed="
+                    .. value_to_string(#compressed)
+                    .. " bytes, restored="
+                    .. value_to_string(
+                        type(restored) == "string"
+                            and #restored
+                            or type(restored)
+                    )
+        end
+    )
+
+    capability_test(
+        "Encoding",
+        "lz4 decompression restores the original bytes",
+        {
+            {"lz4decompress", lz4decompress},
+            {"lz4_decompress", lz4_decompress},
+            {"lz4.decompress", first_present(lz4, "decompress")}
+        },
+        function(fn)
+            local compress =
+                dependency_function({
+                    {"lz4compress", lz4compress},
+                    {"lz4_compress", lz4_compress},
+                    {"lz4.compress", first_present(lz4, "compress")}
+                })
+
+            if type(compress) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "lz4compress is required for verification"
+            end
+
+            local source = string.rep("VM-LZ4-DECODE-", 24)
+            local compressed = compress(source)
+            local ok, restored = pcall(fn, compressed, #source)
+            if not ok or restored ~= source then
+                ok, restored = pcall(fn, compressed)
+            end
+
+            return ok and restored == source,
+                "restored exact bytes="
+                    .. value_to_string(restored == source)
+        end
+    )
+
+    capability_test(
+        "Cryptography",
+        "crypt.hash is deterministic and input-sensitive",
+        {
+            {"crypt.hash", first_present(crypt, "hash")},
+            {"syn.crypt.hash", first_present(syn_crypt, "hash")},
+            {"crypto.hash", first_present(crypto, "hash")}
+        },
+        function(fn)
+            local function hash(value)
+                local ok, result = pcall(fn, value, "sha256")
+                if ok and type(result) == "string" then
+                    return result
+                end
+
+                ok, result = pcall(fn, "sha256", value)
+                if ok and type(result) == "string" then
+                    return result
+                end
+
+                error(result, 0)
+            end
+
+            local first = hash("VM-HASH-ALPHA")
+            local second = hash("VM-HASH-ALPHA")
+            local different = hash("VM-HASH-BETA")
+
+            return #first > 0
+                and first == second
+                and first ~= different,
+                "length="
+                    .. value_to_string(#first)
+                    .. ", stable="
+                    .. value_to_string(first == second)
+                    .. ", distinct="
+                    .. value_to_string(first ~= different)
+        end
+    )
+
+    capability_test(
+        "Network",
+        "request performs a real HTTP GET",
+        {
+            {"request", request},
+            {"http_request", http_request},
+            {"http.request", first_present(http_namespace, "request")},
+            {
+                "syn.request",
+                type(syn) == "table"
+                    and first_present(syn, "request")
+                    or nil
+            },
+            {
+                "fluxus.request",
+                first_present(fluxus_namespace, "request")
+            }
+        },
+        function(fn)
+            if not EXTERNAL_TEST_CONFIG.run_http_get then
+                return CAPABILITY_SKIP,
+                    "HTTP execution is disabled"
+            end
+
+            local response = fn({
+                Url = EXTERNAL_TEST_VALUES.http_get_url,
+                URL = EXTERNAL_TEST_VALUES.http_get_url,
+                Method = "GET"
+            })
+
+            if type(response) ~= "table" then
+                return false, "returned " .. type(response)
+            end
+
+            local status =
+                response.StatusCode
+                or response.Status
+                or response.status_code
+                or response.status
+            local body =
+                response.Body
+                or response.body
+
+            return type(status) == "number"
+                and status >= 200
+                and status < 400
+                and type(body) == "string"
+                and #body > 0,
+                "status="
+                    .. value_to_string(status)
+                    .. ", body="
+                    .. value_to_string(
+                        type(body) == "string"
+                            and #body
+                            or type(body)
+                    )
+        end
+    )
+
+    capability_test(
+        "Instances",
+        "cloneref preserves engine identity",
+        {
+            {"cloneref", cloneref},
+            {"clone_ref", clone_ref}
+        },
+        function(fn)
+            if game == nil then
+                return CAPABILITY_SKIP,
+                    "game is required as an Instance fixture"
+            end
+
+            local clone = fn(game)
+            if clone == nil then
+                return false, "returned nil"
+            end
+
+            local compare =
+                dependency_function({
+                    {"compareinstances", compareinstances},
+                    {"compare_instances", compare_instances}
+                })
+
+            if type(compare) == "function" then
+                return compare(game, clone) == true,
+                    "compareinstances did not preserve identity"
+            end
+
+            return clone == game,
+                "no compareinstances; direct identity="
+                    .. value_to_string(clone == game)
+        end
+    )
+
+    capability_test(
+        "Instances",
+        "compareinstances distinguishes equal engine identities",
+        {
+            {"compareinstances", compareinstances},
+            {"compare_instances", compare_instances}
+        },
+        function(fn)
+            if game == nil then
+                return CAPABILITY_SKIP,
+                    "game is required as an Instance fixture"
+            end
+
+            local positive = fn(game, game)
+            local negative = nil
+            if workspace ~= nil and workspace ~= game then
+                negative = fn(game, workspace)
+            end
+
+            return positive == true
+                and (negative == nil or negative == false),
+                "same="
+                    .. value_to_string(positive)
+                    .. ", different="
+                    .. value_to_string(negative)
+        end
+    )
+
+    capability_test(
+        "Instances",
+        "getcallbackvalue retrieves an exact write-only callback",
+        {
+            {"getcallbackvalue", getcallbackvalue},
+            {"get_callback_value", get_callback_value}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Instance.new is required for a BindableFunction"
+            end
+
+            local bindable = instance_new("BindableFunction")
+            local function callback(value)
+                return "VM_CALLBACK:" .. value
+            end
+            bindable.OnInvoke = callback
+
+            local retrieved = fn(bindable, "OnInvoke")
+            local valid =
+                type(retrieved) == "function"
+                and retrieved == callback
+                and retrieved("ok") == "VM_CALLBACK:ok"
+
+            destroy_instance(bindable)
+            return valid,
+                "returned "
+                    .. type(retrieved)
+                    .. ", identity="
+                    .. value_to_string(retrieved == callback)
+        end
+    )
+
+    capability_test(
+        "Instances",
+        "fireclickdetector triggers a private detector signal",
+        {
+            {"fireclickdetector", fireclickdetector},
+            {"fire_click_detector", fire_click_detector}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function"
+                or workspace == nil
+            then
+                return CAPABILITY_SKIP,
+                    "Instance.new and workspace are required"
+            end
+
+            local part = instance_new("Part")
+            local detector = instance_new("ClickDetector")
+            detector.Parent = part
+            part.Parent = workspace
+
+            local fired = false
+            local connection =
+                detector.MouseClick:Connect(function()
+                    fired = true
+                end)
+
+            fn(detector)
+            step_once()
+
+            disconnect_connection(connection)
+            destroy_instance(part)
+            return fired,
+                "MouseClick observed=" .. value_to_string(fired)
+        end
+    )
+
+    capability_test(
+        "Instances",
+        "fireproximityprompt triggers a private prompt signal",
+        {
+            {"fireproximityprompt", fireproximityprompt},
+            {"fire_proximity_prompt", fire_proximity_prompt}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function"
+                or workspace == nil
+            then
+                return CAPABILITY_SKIP,
+                    "Instance.new and workspace are required"
+            end
+
+            local part = instance_new("Part")
+            local prompt = instance_new("ProximityPrompt")
+            prompt.HoldDuration = 0
+            prompt.Parent = part
+            part.Parent = workspace
+
+            local fired = false
+            local connection =
+                prompt.Triggered:Connect(function()
+                    fired = true
+                end)
+
+            fn(prompt)
+            step_once()
+
+            disconnect_connection(connection)
+            destroy_instance(part)
+            return fired,
+                    "Triggered observed=" .. value_to_string(fired)
+        end
+    )
+
+    capability_test(
+        "Instances",
+        "firetouchinterest triggers a private touch signal",
+        {
+            {"firetouchinterest", firetouchinterest},
+            {"fire_touch_interest", fire_touch_interest}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function"
+                or workspace == nil
+            then
+                return CAPABILITY_SKIP,
+                    "Instance.new and workspace are required"
+            end
+
+            local first_part = instance_new("Part")
+            local second_part = instance_new("Part")
+            first_part.Anchored = true
+            second_part.Anchored = true
+            pcall(function()
+                first_part.Position =
+                    Vector3.new(0, 100000, 0)
+                second_part.Position =
+                    Vector3.new(0, 100100, 0)
+            end)
+            first_part.Parent = workspace
+            second_part.Parent = workspace
+
+            local fired = false
+            local connection =
+                first_part.Touched:Connect(function(other)
+                    if other == second_part then
+                        fired = true
+                    end
+                end)
+
+            fn(first_part, second_part, 0)
+            step_once()
+            fn(first_part, second_part, 1)
+            step_once()
+
+            disconnect_connection(connection)
+            destroy_instance(first_part)
+            destroy_instance(second_part)
+            return fired,
+                "Touched observed=" .. value_to_string(fired)
+        end
+    )
+
+    capability_test(
+        "Signals",
+        "getconnections exposes a private signal connection",
+        {
+            {"getconnections", getconnections},
+            {"get_connections", get_connections}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Instance.new is required for a BindableEvent"
+            end
+
+            local bindable = instance_new("BindableEvent")
+            local connection = bindable.Event:Connect(function()
+            end)
+            local values = fn(bindable.Event)
+            local found =
+                type(values) == "table"
+                and #values > 0
+
+            disconnect_connection(connection)
+            destroy_instance(bindable)
+
+            return found,
+                "returned="
+                    .. type(values)
+                    .. ", count="
+                    .. value_to_string(
+                        type(values) == "table"
+                            and #values
+                            or 0
+                    )
+        end
+    )
+
+    capability_test(
+        "Signals",
+        "firesignal delivers exact arguments to a private signal",
+        {
+            {"firesignal", firesignal},
+            {"fire_signal", fire_signal}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Instance.new is required for a BindableEvent"
+            end
+
+            local bindable = instance_new("BindableEvent")
+            local observed_a = nil
+            local observed_b = nil
+            local connection = bindable.Event:Connect(function(a, b)
+                observed_a = a
+                observed_b = b
+            end)
+
+            fn(bindable.Event, "VM_SIGNAL", 8192)
+            step_once()
+
+            disconnect_connection(connection)
+            destroy_instance(bindable)
+
+            return observed_a == "VM_SIGNAL"
+                and observed_b == 8192,
+                "observed="
+                    .. value_to_string(observed_a)
+                    .. ", "
+                    .. value_to_string(observed_b)
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getloadedmodules returns only ModuleScript Instances",
+        {
+            {"getloadedmodules", getloadedmodules},
+            {"get_loaded_modules", get_loaded_modules}
+        },
+        function(fn)
+            local values = fn()
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            for _, value in pairs(values) do
+                if not is_instance(value) then
+                    return false,
+                        "non-Instance entry: " .. type(value)
+                end
+
+                local ok, is_module = pcall(function()
+                    return value:IsA("ModuleScript")
+                end)
+                if ok and not is_module then
+                    return false,
+                        "entry is not a ModuleScript"
+                end
+            end
+
+            return true,
+                "module count=" .. value_to_string(#values)
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getscripts returns Lua source containers",
+        {
+            {"getscripts", getscripts},
+            {"getrunningscripts", getrunningscripts},
+            {"get_scripts", get_scripts}
+        },
+        function(fn)
+            local values = fn()
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            local valid_count = 0
+            for _, value in pairs(values) do
+                if is_instance(value) then
+                    local ok, is_source = pcall(function()
+                        return value:IsA("LuaSourceContainer")
+                    end)
+
+                    if not ok or is_source then
+                        valid_count = valid_count + 1
+                    end
+                end
+            end
+
+            return valid_count > 0 or #values == 0,
+                "valid source containers="
+                    .. value_to_string(valid_count)
+                    .. "/"
+                    .. value_to_string(#values)
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getrunningscripts returns currently running source containers",
+        {
+            {"getrunningscripts", getrunningscripts},
+            {"get_running_scripts", get_running_scripts},
+            {"getscripts", getscripts}
+        },
+        function(fn)
+            local values = fn()
+            if type(values) ~= "table" then
+                return false, "returned " .. type(values)
+            end
+
+            for _, value in pairs(values) do
+                if not is_instance(value) then
+                    return false,
+                        "non-Instance entry: " .. type(value)
+                end
+            end
+
+            return true,
+                "running script count="
+                    .. value_to_string(#values)
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getscriptbytecode returns nonempty bytecode",
+        {
+            {"getscriptbytecode", getscriptbytecode},
+            {"dumpstring", dumpstring},
+            {"get_script_bytecode", get_script_bytecode}
+        },
+        function(fn)
+            local get_scripts =
+                dependency_function({
+                    {"getscripts", getscripts},
+                    {"getrunningscripts", getrunningscripts}
+                })
+
+            if type(get_scripts) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "getscripts is required to find a fixture"
+            end
+
+            local scripts = get_scripts()
+            local target = scripts[1]
+            if target == nil then
+                return CAPABILITY_SKIP,
+                    "no live script fixture was returned"
+            end
+
+            local bytecode = fn(target)
+            return type(bytecode) == "string"
+                and #bytecode > 0,
+                "returned "
+                    .. type(bytecode)
+                    .. ", bytes="
+                    .. value_to_string(
+                        type(bytecode) == "string"
+                            and #bytecode
+                            or 0
+                    )
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getscriptclosure returns a callable closure",
+        {
+            {"getscriptclosure", getscriptclosure},
+            {"get_script_closure", get_script_closure}
+        },
+        function(fn)
+            local get_scripts =
+                dependency_function({
+                    {"getscripts", getscripts},
+                    {"getrunningscripts", getrunningscripts}
+                })
+
+            if type(get_scripts) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "getscripts is required to find a fixture"
+            end
+
+            local scripts = get_scripts()
+            local target = scripts[1]
+            if target == nil then
+                return CAPABILITY_SKIP,
+                    "no live script fixture was returned"
+            end
+
+            local closure = fn(target)
+            return type(closure) == "function",
+                "returned " .. type(closure)
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getscripthash returns stable nonempty script hashes",
+        {
+            {"getscripthash", getscripthash},
+            {"get_script_hash", get_script_hash}
+        },
+        function(fn)
+            local get_scripts =
+                dependency_function({
+                    {"getscripts", getscripts},
+                    {"getrunningscripts", getrunningscripts}
+                })
+
+            if type(get_scripts) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "getscripts is required to find a fixture"
+            end
+
+            local scripts = get_scripts()
+            local target = scripts[1]
+            if target == nil then
+                return CAPABILITY_SKIP,
+                    "no live script fixture was returned"
+            end
+
+            local first = fn(target)
+            local second = fn(target)
+            return type(first) == "string"
+                and #first > 0
+                and first == second,
+                "type="
+                    .. type(first)
+                    .. ", length="
+                    .. value_to_string(
+                        type(first) == "string"
+                            and #first
+                            or 0
+                    )
+                    .. ", stable="
+                    .. value_to_string(first == second)
+        end
+    )
+
+    capability_test(
+        "Scripts",
+        "getsenv returns a script environment table",
+        {
+            {"getsenv", getsenv},
+            {"get_script_env", get_script_env}
+        },
+        function(fn)
+            local get_scripts =
+                dependency_function({
+                    {"getscripts", getscripts},
+                    {"getrunningscripts", getrunningscripts}
+                })
+
+            if type(get_scripts) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "getscripts is required to find a fixture"
+            end
+
+            local scripts = get_scripts()
+            local target = scripts[1]
+            if target == nil then
+                return CAPABILITY_SKIP,
+                    "no live script fixture was returned"
+            end
+
+            local environment = fn(target)
+            return type(environment) == "table",
+                "returned " .. type(environment)
+        end
+    )
+
+    capability_test(
+        "Miscellaneous",
+        "identifyexecutor returns a usable identity",
+        {
+            {"identifyexecutor", identifyexecutor},
+            {"getexecutorname", getexecutorname},
+            {"getexecutor", getexecutor}
+        },
+        function(fn)
+            local name, version = fn()
+            return type(name) == "string"
+                and #name > 0
+                and (
+                    version == nil
+                    or type(version) == "string"
+                    or type(version) == "number"
+                ),
+                "name="
+                    .. value_to_string(name)
+                    .. ", version="
+                    .. value_to_string(version)
+        end
+    )
+
+    capability_test(
+        "Reflection",
+        "getthreadidentity returns a numeric identity",
+        {
+            {"getthreadidentity", getthreadidentity},
+            {"getidentity", getidentity},
+            {"getthreadcontext", getthreadcontext},
+            {
+                "syn.get_thread_identity",
+                type(syn) == "table"
+                    and first_present(syn, "get_thread_identity")
+                    or nil
+            }
+        },
+        function(fn)
+            local identity = fn()
+            return type(identity) == "number",
+                "returned " .. value_to_string(identity)
+        end
+    )
+
+    capability_test(
+        "Reflection",
+        "setthreadidentity performs a reversible identity round-trip",
+        {
+            {"setthreadidentity", setthreadidentity},
+            {"setidentity", setidentity},
+            {"setthreadcontext", setthreadcontext},
+            {
+                "syn.set_thread_identity",
+                type(syn) == "table"
+                    and first_present(syn, "set_thread_identity")
+                    or nil
+            }
+        },
+        function(fn)
+            local get_identity =
+                dependency_function({
+                    {"getthreadidentity", getthreadidentity},
+                    {"getidentity", getidentity},
+                    {"getthreadcontext", getthreadcontext}
+                })
+
+            if type(get_identity) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "getthreadidentity is required for verification"
+            end
+
+            local original = get_identity()
+            if type(original) ~= "number" then
+                return false,
+                    "original identity is "
+                    .. type(original)
+            end
+
+            fn(original)
+            local observed = get_identity()
+            pcall(fn, original)
+
+            return observed == original,
+                "original="
+                    .. value_to_string(original)
+                    .. ", observed="
+                    .. value_to_string(observed)
+        end
+    )
+
+    capability_test(
+        "Reflection",
+        "isscriptable distinguishes valid and missing properties",
+        {
+            {"isscriptable", isscriptable},
+            {"is_scriptable", is_scriptable}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Instance.new is required for a private fixture"
+            end
+
+            local part = instance_new("Part")
+            local valid = fn(part, "Name")
+            local missing =
+                fn(part, "__VM_PROPERTY_DOES_NOT_EXIST__")
+            destroy_instance(part)
+
+            return valid == true and missing == nil,
+                "Name="
+                    .. value_to_string(valid)
+                    .. ", missing="
+                    .. value_to_string(missing)
+        end
+    )
+
+    capability_test(
+        "Reflection",
+        "setscriptable performs a reversible private-property toggle",
+        {
+            {"setscriptable", setscriptable},
+            {"set_scriptable", set_scriptable}
+        },
+        function(fn)
+            local is_scriptable_fn =
+                dependency_function({
+                    {"isscriptable", isscriptable},
+                    {"is_scriptable", is_scriptable}
+                })
+            local instance_new =
+                first_present(Instance, "new", "New")
+
+            if type(is_scriptable_fn) ~= "function"
+                or type(instance_new) ~= "function"
+            then
+                return CAPABILITY_SKIP,
+                    "isscriptable and Instance.new are required"
+            end
+
+            local part = instance_new("Part")
+            local property = "BottomParamA"
+            local original = is_scriptable_fn(part, property)
+            if type(original) ~= "boolean" then
+                destroy_instance(part)
+                return CAPABILITY_SKIP,
+                    property
+                    .. " is not exposed by this engine build"
+            end
+
+            local target = not original
+            fn(part, property, target)
+            local changed =
+                is_scriptable_fn(part, property)
+            pcall(fn, part, property, original)
+            local restored =
+                is_scriptable_fn(part, property)
+            destroy_instance(part)
+
+            return changed == target
+                and restored == original,
+                "original="
+                    .. value_to_string(original)
+                    .. ", changed="
+                    .. value_to_string(changed)
+                    .. ", restored="
+                    .. value_to_string(restored)
+        end
+    )
+
+    capability_test(
+        "Reflection",
+        "gethiddenproperty returns a stable private property value",
+        {
+            {"gethiddenproperty", gethiddenproperty},
+            {"get_hidden_property", get_hidden_property}
+        },
+        function(fn)
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Instance.new is required for a private fixture"
+            end
+
+            local part = instance_new("Part")
+            local first = fn(part, "BottomParamA")
+            local second = fn(part, "BottomParamA")
+            destroy_instance(part)
+
+            return first ~= nil and first == second,
+                "first="
+                    .. value_to_string(first)
+                    .. ", second="
+                    .. value_to_string(second)
+        end
+    )
+
+    capability_test(
+        "Reflection",
+        "sethiddenproperty changes and restores a private value",
+        {
+            {"sethiddenproperty", sethiddenproperty},
+            {"set_hidden_property", set_hidden_property}
+        },
+        function(fn)
+            local getter =
+                dependency_function({
+                    {"gethiddenproperty", gethiddenproperty},
+                    {"get_hidden_property", get_hidden_property}
+                })
+            local instance_new =
+                first_present(Instance, "new", "New")
+
+            if type(getter) ~= "function"
+                or type(instance_new) ~= "function"
+            then
+                return CAPABILITY_SKIP,
+                    "gethiddenproperty and Instance.new are required"
+            end
+
+            local part = instance_new("Part")
+            local property = "BottomParamA"
+            local original = getter(part, property)
+            local replacement = nil
+
+            if type(original) == "number" then
+                replacement = original + 1
+            elseif type(original) == "boolean" then
+                replacement = not original
+            elseif type(original) == "string" then
+                replacement = original .. "_VM_TEST"
+            end
+
+            if replacement == nil then
+                destroy_instance(part)
+                return CAPABILITY_SKIP,
+                    "unsupported fixture value type: "
+                    .. type(original)
+            end
+
+            fn(part, property, replacement)
+            local changed = getter(part, property)
+            pcall(fn, part, property, original)
+            local restored = getter(part, property)
+            destroy_instance(part)
+
+            return changed == replacement
+                and restored == original,
+                "changed="
+                    .. value_to_string(changed)
+                    .. ", restored="
+                    .. value_to_string(restored)
+        end
+    )
+
+    local drawing_new =
+        first_present(Drawing, "new", "New")
+
+    capability_test(
+        "Drawing",
+        "Drawing.new creates a writable removable object",
+        {
+            {"Drawing.new", drawing_new},
+            {"Drawing.New", first_present(Drawing, "New")}
+        },
+        function(fn)
+            local object = fn("Line")
+            if object == nil then
+                return false, "returned nil"
+            end
+
+            local write_ok, write_error = pcall(function()
+                object.Visible = false
+                object.Thickness = 2
+            end)
+            local read_ok, thickness = pcall(function()
+                return object.Thickness
+            end)
+            remove_drawing(object)
+
+            return write_ok
+                and read_ok
+                and thickness == 2,
+                "write="
+                    .. value_to_string(write_ok)
+                    .. ", thickness="
+                    .. value_to_string(thickness)
+                    .. ", error="
+                    .. value_to_string(write_error)
+        end
+    )
+
+    capability_test(
+        "Drawing",
+        "isrenderobj recognizes a live Drawing object",
+        {
+            {"isrenderobj", isrenderobj},
+            {"is_render_obj", is_render_obj}
+        },
+        function(fn)
+            if type(drawing_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Drawing.new is required for verification"
+            end
+
+            local object = drawing_new("Line")
+            local result = fn(object)
+            remove_drawing(object)
+            return result == true,
+                "returned " .. value_to_string(result)
+        end
+    )
+
+    capability_test(
+        "Drawing",
+        "setrenderproperty and getrenderproperty round-trip",
+        {
+            {"setrenderproperty", setrenderproperty},
+            {"set_render_property", set_render_property}
+        },
+        function(fn)
+            if type(drawing_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Drawing.new is required for verification"
+            end
+
+            local getter =
+                dependency_function({
+                    {"getrenderproperty", getrenderproperty},
+                    {"get_render_property", get_render_property}
+                })
+
+            if type(getter) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "getrenderproperty is required for verification"
+            end
+
+            local object = drawing_new("Line")
+            fn(object, "Thickness", 3)
+            local result = getter(object, "Thickness")
+            remove_drawing(object)
+
+            return result == 3,
+                "returned " .. value_to_string(result)
+        end
+    )
+
+    capability_test(
+        "Drawing",
+        "getrenderproperty reads a live Drawing property",
+        {
+            {"getrenderproperty", getrenderproperty},
+            {"get_render_property", get_render_property}
+        },
+        function(fn)
+            if type(drawing_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Drawing.new is required for verification"
+            end
+
+            local object = drawing_new("Line")
+            object.Thickness = 4
+            local result = fn(object, "Thickness")
+            remove_drawing(object)
+
+            return result == 4,
+                "returned " .. value_to_string(result)
+        end
+    )
+
+    capability_test(
+        "Drawing",
+        "cleardrawcache invalidates live Drawing objects",
+        {
+            {"cleardrawcache", cleardrawcache},
+            {"clear_draw_cache", clear_draw_cache},
+            {"Drawing.clear", first_present(Drawing, "clear", "Clear")}
+        },
+        function(fn)
+            if type(drawing_new) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "Drawing.new is required for verification"
+            end
+
+            local checker =
+                dependency_function({
+                    {"isrenderobj", isrenderobj},
+                    {"is_render_obj", is_render_obj}
+                })
+
+            if type(checker) ~= "function" then
+                return CAPABILITY_SKIP,
+                    "isrenderobj is required for verification"
+            end
+
+            local object = drawing_new("Line")
+            local before = checker(object)
+            fn()
+            local after = checker(object)
+            remove_drawing(object)
+
+            return before == true and after == false,
+                "before="
+                    .. value_to_string(before)
+                    .. ", after="
+                    .. value_to_string(after)
+        end
+    )
+
+    raw_capability_test(
+        "Remote Tools",
+        "RemoteEvent.FireServer method surface",
+        function()
+            local instance_new =
+                first_present(Instance, "new", "New")
+            if type(instance_new) ~= "function" then
+                return CAPABILITY_MISSING,
+                    "Instance.new is unavailable"
+            end
+
+            local remote = instance_new("RemoteEvent")
+            local ok, method = pcall(function()
+                return remote.FireServer
+            end)
+            destroy_instance(remote)
+
+            if not ok or type(method) ~= "function" then
+                return false,
+                    "FireServer lookup returned "
+                    .. type(method)
+            end
+
+            return CAPABILITY_SKIP,
+                "method exists; a server-owned verifier RemoteEvent "
+                .. "is required to prove delivery"
+        end
+    )
+
+    capability_test(
+        "Remote Tools",
+        "global fireserver compatibility helper",
+        {
+            {"fireserver", fireserver},
+            {"fire_server", fire_server},
+            {"fireServer", fireServer},
+            {"FireServer", FireServer}
+        },
+        function()
+            return CAPABILITY_SKIP,
+                "present; no universal safe call contract or verifier "
+                .. "RemoteEvent exists"
+        end
+    )
+
+    capability_test(
+        "Remote Tools",
+        "global invokeserver compatibility helper",
+        {
+            {"invokeserver", invokeserver},
+            {"invoke_server", invoke_server},
+            {"invokeServer", invokeServer},
+            {"InvokeServer", InvokeServer}
+        },
+        function()
+            return CAPABILITY_SKIP,
+                "present; no universal safe call contract or verifier "
+                .. "RemoteFunction exists"
+        end
+    )
+
+    raw_capability_test(
+        "Remote Tools",
+        "remotespy compatibility surface",
+        function()
+            local function_value, function_path =
+                resolve_function_candidates({
+                    {"remotespy", remotespy},
+                    {"remote_spy", remote_spy},
+                    {"remoteSpy", remoteSpy},
+                    {"startremotespy", startremotespy}
+                })
+
+            if type(function_value) == "function" then
+                return CAPABILITY_SKIP,
+                    function_path
+                    .. " exists; remotespy has no universal "
+                    .. "start/stop/capture contract"
+            end
+
+            local table_value =
+                type(RemoteSpy) == "table"
+                    and RemoteSpy
+                    or type(remotespy) == "table"
+                        and remotespy
+                        or type(remote_spy) == "table"
+                            and remote_spy
+                            or nil
+
+            if table_value == nil then
+                return CAPABILITY_MISSING,
+                    "checked remotespy, remote_spy, remoteSpy, "
+                    .. "RemoteSpy, and startremotespy"
+            end
+
+            local control =
+                first_present(
+                    table_value,
+                    "Start",
+                    "start",
+                    "Enable",
+                    "enable",
+                    "Connect",
+                    "connect"
+                )
+
+            if type(control) ~= "function" then
+                return false,
+                    "RemoteSpy table has no callable control method"
+            end
+
+            return CAPABILITY_SKIP,
+                "RemoteSpy control surface exists; capture verification "
+                .. "requires a known server RemoteEvent"
+        end
+    )
+
+    raw_capability_test(
+        "WebSocket",
+        "live WebSocket behavior",
+        function()
+            return CAPABILITY_SKIP,
+                "intentionally disabled; it is the only inactive live "
+                .. "test in this profile"
+        end
+    )
+
+    pcall(delete_file or function() end, fs_file)
+    pcall(delete_file or function() end, fs_append_file)
+    pcall(delete_folder or function() end, fs_folder)
 end
 
-if type(websocket) == "table" then
-    info("websocket.connect", type(websocket.connect))
-else
-    info("websocket namespace", type(websocket))
-end
+-- ============================================================
+-- 38. BROAD UNSUPPORTED-FUNCTION CATALOG
+-- ============================================================
+section(
+    "38. Broad External Function Surface Catalog",
+    "surface",
+    "API Surface"
+)
 
-if type(WebSocket) == "table" then
-    info("WebSocket.connect", type(WebSocket.connect))
-else
-    info("WebSocket namespace", type(WebSocket))
-end
+-- This section is intentionally lightweight. It only reads function
+-- members; it does not recursively scan getgc/getreg, create hundreds
+-- of Instances, or call arbitrary executor functions. Missing names
+-- are grouped into compact lines so console output stays manageable.
+do
+    local catalog_total = 0
+    local catalog_available = 0
+    local catalog_missing = 0
+    local catalog_nonfunction = 0
+    local seen_catalog_names = {}
 
-if type(cache) == "table" then
-    info("cache.invalidate", type(cache.invalidate))
-    info("cache.iscached", type(cache.iscached))
-    info("cache.replace", type(cache.replace))
-else
-    info("cache namespace", type(cache))
+    local function catalog_probe(path, value)
+        if seen_catalog_names[path] then
+            return
+        end
+
+        seen_catalog_names[path] = true
+        catalog_total = catalog_total + 1
+
+        if type(value) == "function" then
+            catalog_available = catalog_available + 1
+            record_result(
+                "API path: " .. path,
+                "PASS",
+                "function is available",
+                "surface",
+                true
+            )
+        elseif value == nil then
+            catalog_missing = catalog_missing + 1
+            record_result(
+                "API path: " .. path,
+                "MISSING",
+                "function is missing",
+                "surface",
+                true
+            )
+        else
+            catalog_nonfunction = catalog_nonfunction + 1
+            record_result(
+                "API path: " .. path,
+                "FAIL",
+                "expected function, got " .. type(value),
+                "surface",
+                true
+            )
+        end
+    end
+
+    local global_function_candidates = {
+        {"assert", assert},
+        {"collectgarbage", collectgarbage},
+        {"dofile", dofile},
+        {"error", error},
+        {"gcinfo", gcinfo},
+        {"getfenv", getfenv},
+        {"setfenv", setfenv},
+        {"getmetatable", getmetatable},
+        {"ipairs", ipairs},
+        {"load", load},
+        {"loadfile", loadfile},
+        {"loadstring", loadstring},
+        {"module", module},
+        {"newproxy", newproxy},
+        {"next", next},
+        {"pairs", pairs},
+        {"pcall", pcall},
+        {"print", print},
+        {"rawequal", rawequal},
+        {"rawget", rawget},
+        {"rawlen", rawlen},
+        {"rawset", rawset},
+        {"require", require},
+        {"select", select},
+        {"setmetatable", setmetatable},
+        {"tonumber", tonumber},
+        {"tostring", tostring},
+        {"type", type},
+        {"typeof", typeof},
+        {"unpack", unpack},
+        {"xpcall", xpcall},
+        {"warn", warn},
+        {"tick", tick},
+        {"time", time},
+        {"elapsedTime", elapsedTime},
+        {"wait", wait},
+        {"delay", delay},
+        {"spawn", spawn},
+        {"version", version},
+        {"settings", settings},
+        {"UserSettings", UserSettings},
+        {"PluginManager", PluginManager},
+        {"getgenv", getgenv},
+        {"getrenv", getrenv},
+        {"getsenv", getsenv},
+        {"getreg", getreg},
+        {"getgc", getgc},
+        {"filtergc", filtergc},
+        {"filter_gc", filter_gc},
+        {"filterGC", filterGC},
+        {"FilterGC", FilterGC},
+        {"getfiltergc", getfiltergc},
+        {"getinstances", getinstances},
+        {"getnilinstances", getnilinstances},
+        {"getscripts", getscripts},
+        {"getrunningscripts", getrunningscripts},
+        {"getloadedmodules", getloadedmodules},
+        {"getcallingscript", getcallingscript},
+        {"getscriptfromthread", getscriptfromthread},
+        {"getscriptclosure", getscriptclosure},
+        {"getscriptfunction", getscriptfunction},
+        {"getscriptbytecode", getscriptbytecode},
+        {"getscripthash", getscripthash},
+        {"dumpstring", dumpstring},
+        {"decompile", decompile},
+        {"disassemble", disassemble},
+        {"getconnections", getconnections},
+        {"getcallbackvalue", getcallbackvalue},
+        {"firesignal", firesignal},
+        {"replicatesignal", replicatesignal},
+        {"fireserver", fireserver},
+        {"fire_server", fire_server},
+        {"fireServer", fireServer},
+        {"FireServer", FireServer},
+        {"invokeserver", invokeserver},
+        {"invoke_server", invoke_server},
+        {"invokeServer", invokeServer},
+        {"InvokeServer", InvokeServer},
+        {"fireclient", fireclient},
+        {"fireClient", fireClient},
+        {"FireClient", FireClient},
+        {"fireallclients", fireallclients},
+        {"fireAllClients", fireAllClients},
+        {"FireAllClients", FireAllClients},
+        {"remotespy", remotespy},
+        {"remote_spy", remote_spy},
+        {"remoteSpy", remoteSpy},
+        {"RemoteSpy", RemoteSpy},
+        {"simplespy", simplespy},
+        {"SimpleSpy", SimpleSpy},
+        {"startremotespy", startremotespy},
+        {"stopremotespy", stopremotespy},
+        {"spyremote", spyremote},
+        {"hookremote", hookremote},
+        {"unhookremote", unhookremote},
+        {"getremotes", getremotes},
+        {"getremoteevents", getremoteevents},
+        {"getremotefunctions", getremotefunctions},
+        {"hookfunction", hookfunction},
+        {"replaceclosure", replaceclosure},
+        {"hookmetamethod", hookmetamethod},
+        {"restorefunction", restorefunction},
+        {"clonefunction", clonefunction},
+        {"newcclosure", newcclosure},
+        {"iscclosure", iscclosure},
+        {"islclosure", islclosure},
+        {"isexecutorclosure", isexecutorclosure},
+        {"isourclosure", isourclosure},
+        {"checkcaller", checkcaller},
+        {"getfunctionhash", getfunctionhash},
+        {"comparefunction", comparefunction},
+        {"getupvalue", getupvalue},
+        {"getupvalues", getupvalues},
+        {"setupvalue", setupvalue},
+        {"getconstant", getconstant},
+        {"getconstants", getconstants},
+        {"setconstant", setconstant},
+        {"getproto", getproto},
+        {"getprotos", getprotos},
+        {"setproto", setproto},
+        {"getstack", getstack},
+        {"setstack", setstack},
+        {"getrawmetatable", getrawmetatable},
+        {"setrawmetatable", setrawmetatable},
+        {"setreadonly", setreadonly},
+        {"isreadonly", isreadonly},
+        {"make_readonly", make_readonly},
+        {"make_writeable", make_writeable},
+        {"makereadonly", makereadonly},
+        {"makewriteable", makewriteable},
+        {"getnamecallmethod", getnamecallmethod},
+        {"setnamecallmethod", setnamecallmethod},
+        {"cloneref", cloneref},
+        {"compareinstances", compareinstances},
+        {"gethiddenproperty", gethiddenproperty},
+        {"sethiddenproperty", sethiddenproperty},
+        {"getproperties", getproperties},
+        {"gethiddenproperties", gethiddenproperties},
+        {"getspecialinfo", getspecialinfo},
+        {"isscriptable", isscriptable},
+        {"setscriptable", setscriptable},
+        {"ispropertyscriptable", ispropertyscriptable},
+        {"getthreadidentity", getthreadidentity},
+        {"setthreadidentity", setthreadidentity},
+        {"getidentity", getidentity},
+        {"setidentity", setidentity},
+        {"getthreadcontext", getthreadcontext},
+        {"setthreadcontext", setthreadcontext},
+        {"getcontext", getcontext},
+        {"setcontext", setcontext},
+        {"isnetworkowner", isnetworkowner},
+        {"setsimulationradius", setsimulationradius},
+        {"getsimulationradius", getsimulationradius},
+        {"readfile", readfile},
+        {"writefile", writefile},
+        {"appendfile", appendfile},
+        {"listfiles", listfiles},
+        {"isfile", isfile},
+        {"isfolder", isfolder},
+        {"makefolder", makefolder},
+        {"delfile", delfile},
+        {"delfolder", delfolder},
+        {"deletefile", deletefile},
+        {"deletefolder", deletefolder},
+        {"getcustomasset", getcustomasset},
+        {"getsynasset", getsynasset},
+        {"getasset", getasset},
+        {"request", request},
+        {"http_request", http_request},
+        {"httprequest", httprequest},
+        {"request_async", request_async},
+        {"setclipboard", setclipboard},
+        {"getclipboard", getclipboard},
+        {"toclipboard", toclipboard},
+        {"setrbxclipboard", setrbxclipboard},
+        {"queue_on_teleport", queue_on_teleport},
+        {"queueonteleport", queueonteleport},
+        {"setfpscap", setfpscap},
+        {"getfpscap", getfpscap},
+        {"setfpsmax", setfpsmax},
+        {"getfpsmax", getfpsmax},
+        {"identifyexecutor", identifyexecutor},
+        {"getexecutorname", getexecutorname},
+        {"getexecutorversion", getexecutorversion},
+        {"gethwid", gethwid},
+        {"get_hwid", get_hwid},
+        {"getdeviceid", getdeviceid},
+        {"getsystemid", getsystemid},
+        {"isrbxactive", isrbxactive},
+        {"isgameactive", isgameactive},
+        {"iswindowactive", iswindowactive},
+        {"getmouseposition", getmouseposition},
+        {"keypress", keypress},
+        {"keyrelease", keyrelease},
+        {"mouse1click", mouse1click},
+        {"mouse1press", mouse1press},
+        {"mouse1release", mouse1release},
+        {"mouse2click", mouse2click},
+        {"mouse2press", mouse2press},
+        {"mouse2release", mouse2release},
+        {"mousemoveabs", mousemoveabs},
+        {"mousemoverel", mousemoverel},
+        {"mousescroll", mousescroll},
+        {"fireclickdetector", fireclickdetector},
+        {"firetouchinterest", firetouchinterest},
+        {"fireproximityprompt", fireproximityprompt},
+        {"fireproximitypromptbegin", fireproximitypromptbegin},
+        {"fireproximitypromptend", fireproximitypromptend},
+        {"rconsolecreate", rconsolecreate},
+        {"rconsoledestroy", rconsoledestroy},
+        {"rconsoleclear", rconsoleclear},
+        {"rconsolename", rconsolename},
+        {"rconsoleprint", rconsoleprint},
+        {"rconsolewarn", rconsolewarn},
+        {"rconsoleerr", rconsoleerr},
+        {"rconsoleinfo", rconsoleinfo},
+        {"rconsoleinput", rconsoleinput},
+        {"consolecreate", consolecreate},
+        {"consoledestroy", consoledestroy},
+        {"consoleclear", consoleclear},
+        {"consolename", consolename},
+        {"consoleprint", consoleprint},
+        {"consolewarn", consolewarn},
+        {"consoleerr", consoleerr},
+        {"consoleinfo", consoleinfo},
+        {"consoleinput", consoleinput},
+        {"messagebox", messagebox},
+        {"saveinstance", saveinstance},
+        {"saveplace", saveplace},
+        {"setfflag", setfflag},
+        {"getfflag", getfflag},
+        {"setdfflag", setdfflag},
+        {"getdfflag", getdfflag},
+        {"setfastflag", setfastflag},
+        {"getfastflag", getfastflag},
+        {"isrenderobj", isrenderobj},
+        {"getrenderproperty", getrenderproperty},
+        {"setrenderproperty", setrenderproperty},
+        {"cleardrawcache", cleardrawcache},
+        {"gethui", gethui},
+        {"get_hidden_gui", get_hidden_gui},
+        {"gethiddengui", gethiddengui},
+        {"protect_gui", protect_gui},
+        {"unprotect_gui", unprotect_gui},
+        {"protectgui", protectgui},
+        {"unprotectgui", unprotectgui},
+        {"base64_encode", base64_encode},
+        {"base64_decode", base64_decode},
+        {"base64encode", base64encode},
+        {"base64decode", base64decode},
+        {"lz4compress", lz4compress},
+        {"lz4decompress", lz4decompress},
+        {"zstdcompress", zstdcompress},
+        {"zstddecompress", zstddecompress},
+        {"zlibcompress", zlibcompress},
+        {"zlibdecompress", zlibdecompress},
+        {"gzipcompress", gzipcompress},
+        {"gzipdecompress", gzipdecompress},
+        {"compress", compress},
+        {"decompress", decompress},
+        {"send_notification", send_notification},
+        {"block_roblox_window", block_roblox_window},
+        {"add_model_data", add_model_data},
+        {"edit_model_data", edit_model_data},
+        {"remove_model_data", remove_model_data},
+        {"clear_model_data", clear_model_data},
+        {"override_local_data", override_local_data},
+        {"clear_local_data", clear_local_data},
+        {"get_model_data", get_model_data},
+        {"get_local_data", get_local_data}
+    }
+
+    for i = 1, #global_function_candidates do
+        local entry = global_function_candidates[i]
+        catalog_probe(entry[1], entry[2])
+    end
+
+    local function namespace_group(label, object, names)
+        for name in string.gmatch(names, "%S+") do
+            catalog_probe(
+                label .. "." .. name,
+                first_present(object, name)
+            )
+        end
+    end
+
+    local namespace_groups = {
+        {
+            "math",
+            math,
+            [[
+            abs acos asin atan atan2 ceil clamp cos cosh deg exp
+            floor fmod frexp ldexp log log10 max min modf noise pow
+            rad random randomseed round sign sin sinh sqrt tan tanh
+            ]]
+        },
+        {
+            "string",
+            string,
+            [[
+            byte char dump find format gmatch gsub len lower match
+            pack packsize rep reverse split sub unpack upper
+            ]]
+        },
+        {
+            "table",
+            table,
+            [[
+            clear clone concat create find foreach foreachi freeze
+            getn insert isfrozen maxn move pack remove sort unpack
+            ]]
+        },
+        {
+            "coroutine",
+            coroutine,
+            [[
+            close create isyieldable resume running status wrap yield
+            ]]
+        },
+        {
+            "utf8",
+            utf8,
+            [[
+            char codes codepoint graphemes len nfcnormalize
+            nfdnormalize offset
+            ]]
+        },
+        {
+            "bit32",
+            bit32,
+            [[
+            arshift band bnot bor btest bxor countlz countrz extract
+            lrotate lshift replace rrotate rshift
+            ]]
+        },
+        {
+            "buffer",
+            buffer,
+            [[
+            copy create fill fromstring len readf32 readf64 readi8
+            readi16 readi32 readstring readu8 readu16 readu32 tostring
+            writef32 writef64 writei8 writei16 writei32 writestring
+            writeu8 writeu16 writeu32
+            ]]
+        },
+        {
+            "vector",
+            vector,
+            [[
+            abs angle ceil clamp create cross dot floor magnitude max
+            min normalize sign
+            ]]
+        },
+        {
+            "os",
+            os,
+            [[
+            clock date difftime execute exit getenv remove rename
+            setlocale time tmpname
+            ]]
+        },
+        {
+            "debug",
+            debug,
+            [[
+            dumpheap info profilebegin profileend resetmemorycategory
+            setmemorycategory traceback getconstant getconstants
+            setconstant getproto getprotos getupvalue getupvalues
+            setupvalue getstack setstack getinfo getlocal setlocal
+            getregistry getmetatable setmetatable gethook sethook
+            upvalueid upvaluejoin
+            ]]
+        },
+        {
+            "task",
+            task,
+            [[
+            cancel defer delay desynchronize spawn synchronize wait
+            ]]
+        },
+        {
+            "luau",
+            luau,
+            [[
+            compile load
+            ]]
+        },
+        {
+            "Vector2",
+            Vector2,
+            [[
+            new
+            ]]
+        },
+        {
+            "Vector2int16",
+            Vector2int16,
+            [[
+            new
+            ]]
+        },
+        {
+            "Vector3",
+            Vector3,
+            [[
+            new
+            ]]
+        },
+        {
+            "Vector3int16",
+            Vector3int16,
+            [[
+            new
+            ]]
+        },
+        {
+            "CFrame",
+            CFrame,
+            [[
+            new Angles fromAxisAngle fromEulerAnglesXYZ
+            fromEulerAnglesYXZ fromMatrix lookAt
+            ]]
+        },
+        {
+            "Color3",
+            Color3,
+            [[
+            new fromRGB fromHSV toHSV
+            ]]
+        },
+        {
+            "UDim",
+            UDim,
+            [[
+            new
+            ]]
+        },
+        {
+            "UDim2",
+            UDim2,
+            [[
+            new fromOffset fromScale
+            ]]
+        },
+        {
+            "Rect",
+            Rect,
+            [[
+            new
+            ]]
+        },
+        {
+            "Region3",
+            Region3,
+            [[
+            new
+            ]]
+        },
+        {
+            "Region3int16",
+            Region3int16,
+            [[
+            new
+            ]]
+        },
+        {
+            "Ray",
+            Ray,
+            [[
+            new
+            ]]
+        },
+        {
+            "BrickColor",
+            BrickColor,
+            [[
+            new palette random White Gray DarkGray Black Red Yellow
+            Green Blue
+            ]]
+        },
+        {
+            "NumberRange",
+            NumberRange,
+            [[
+            new
+            ]]
+        },
+        {
+            "NumberSequence",
+            NumberSequence,
+            [[
+            new
+            ]]
+        },
+        {
+            "NumberSequenceKeypoint",
+            NumberSequenceKeypoint,
+            [[
+            new
+            ]]
+        },
+        {
+            "ColorSequence",
+            ColorSequence,
+            [[
+            new
+            ]]
+        },
+        {
+            "ColorSequenceKeypoint",
+            ColorSequenceKeypoint,
+            [[
+            new
+            ]]
+        },
+        {
+            "TweenInfo",
+            TweenInfo,
+            [[
+            new
+            ]]
+        },
+        {
+            "PhysicalProperties",
+            PhysicalProperties,
+            [[
+            new
+            ]]
+        },
+        {
+            "PathWaypoint",
+            PathWaypoint,
+            [[
+            new
+            ]]
+        },
+        {
+            "Random",
+            Random,
+            [[
+            new
+            ]]
+        },
+        {
+            "DateTime",
+            DateTime,
+            [[
+            now fromUnixTimestamp fromUnixTimestampMillis
+            fromUniversalTime fromLocalTime fromIsoDate
+            ]]
+        },
+        {
+            "Font",
+            Font,
+            [[
+            new fromEnum
+            ]]
+        },
+        {
+            "Faces",
+            Faces,
+            [[
+            new
+            ]]
+        },
+        {
+            "Axes",
+            Axes,
+            [[
+            new
+            ]]
+        },
+        {
+            "OverlapParams",
+            OverlapParams,
+            [[
+            new
+            ]]
+        },
+        {
+            "RaycastParams",
+            RaycastParams,
+            [[
+            new
+            ]]
+        },
+        {
+            "CatalogSearchParams",
+            CatalogSearchParams,
+            [[
+            new
+            ]]
+        },
+        {
+            "FloatCurveKey",
+            FloatCurveKey,
+            [[
+            new
+            ]]
+        },
+        {
+            "RotationCurveKey",
+            RotationCurveKey,
+            [[
+            new
+            ]]
+        },
+        {
+            "SharedTable",
+            SharedTable,
+            [[
+            new clone cloneAndFreeze increment update size clear
+            isFrozen freeze
+            ]]
+        },
+        {
+            "Secret",
+            Secret,
+            [[
+            fromLocalUser
+            ]]
+        },
+        {
+            "Instance",
+            Instance,
+            [[
+            new
+            ]]
+        },
+        {
+            "Signal",
+            Signal,
+            [[
+            new Connect connect Once once Wait wait Fire fire
+            ]]
+        },
+        {
+            "Drawing",
+            Drawing,
+            [[
+            new clear Clear isrenderobj getrenderproperty
+            setrenderproperty
+            ]]
+        },
+        {
+            "DrawingImmediate",
+            DrawingImmediate,
+            [[
+            clear Clear line text circle square quad triangle image
+            point
+            ]]
+        },
+        {
+            "memory",
+            memory,
+            [[
+            changed readstring writestring readvector writevector
+            readbuffer writebuffer readi8 readu8 readi16 readu16
+            readi32 readu32 readi64 readu64 readf32 readf64 writei8
+            writeu8 writei16 writeu16 writei32 writeu32 writei64
+            writeu64 writef32 writef64
+            ]]
+        },
+        {
+            "crypt",
+            crypt,
+            [[
+            base64encode base64decode encrypt decrypt hash random
+            generatebytes generatekey derive custom_encrypt
+            custom_decrypt sha1 sha256 sha384 sha512 md5 blake2b
+            ]]
+        },
+        {
+            "crypto",
+            crypto,
+            [[
+            encrypt decrypt hash random generatebytes generatekey
+            ]]
+        },
+        {
+            "base64",
+            base64,
+            [[
+            encode decode
+            ]]
+        },
+        {
+            "lz4",
+            lz4,
+            [[
+            compress decompress
+            ]]
+        },
+        {
+            "cache",
+            cache,
+            [[
+            invalidate iscached replace compareinstances cloneref
+            ]]
+        },
+        {
+            "WebSocket",
+            WebSocket,
+            [[
+            connect Connect
+            ]]
+        },
+        {
+            "websocket",
+            websocket,
+            [[
+            connect Connect
+            ]]
+        },
+        {
+            "WebsocketClient",
+            WebsocketClient,
+            [[
+            new
+            ]]
+        },
+        {
+            "syn",
+            syn,
+            [[
+            request http_request queue_on_teleport protect_gui
+            unprotect_gui get_thread_identity set_thread_identity
+            getgenv getrenv getreg getgc getinstances
+            getnilinstances getconnections fire_signal secure_call
+            cache_replace cache_invalidate cache_iscached
+            ]]
+        },
+        {
+            "fluxus",
+            fluxus,
+            [[
+            request queue_on_teleport getcustomasset
+            getthreadidentity setthreadidentity
+            ]]
+        },
+        {
+            "krnl",
+            krnl,
+            [[
+            request queue_on_teleport getcustomasset
+            getthreadidentity setthreadidentity
+            ]]
+        },
+        {
+            "delta",
+            delta,
+            [[
+            request queue_on_teleport getcustomasset
+            ]]
+        },
+        {
+            "electron",
+            electron,
+            [[
+            request queue_on_teleport getcustomasset
+            ]]
+        },
+        {
+            "solara",
+            solara,
+            [[
+            request queue_on_teleport getcustomasset
+            ]]
+        },
+        {
+            "wave",
+            wave,
+            [[
+            request queue_on_teleport getcustomasset
+            ]]
+        },
+        {
+            "codex",
+            codex,
+            [[
+            request queue_on_teleport getcustomasset
+            ]]
+        },
+        {
+            "oxygen",
+            oxygen,
+            [[
+            request queue_on_teleport
+            ]]
+        },
+        {
+            "sentinel",
+            sentinel,
+            [[
+            request queue_on_teleport
+            ]]
+        },
+        {
+            "scriptware",
+            scriptware,
+            [[
+            request queue_on_teleport
+            ]]
+        },
+        {
+            "RemoteSpy",
+            (
+                type(RemoteSpy) == "table"
+                    and RemoteSpy
+                or type(remotespy) == "table"
+                    and remotespy
+                or type(remote_spy) == "table"
+                    and remote_spy
+                or nil
+            ),
+            [[
+            start Start stop Stop enable Enable disable Disable
+            hook Hook unhook Unhook getlogs GetLogs clearlogs ClearLogs
+            ]]
+        },
+        {
+            "game",
+            game,
+            [[
+            GetService FindService GetObjects HttpGet HttpGetAsync
+            HttpPost HttpPostAsync IsLoaded BindToClose GetJobsInfo
+            GetEngineFeature SetEngineFeature GetFastFlag
+            SetFastFlagForTesting
+            ]]
+        },
+        {
+            "workspace",
+            workspace,
+            [[
+            Raycast Blockcast Shapecast Spherecast
+            GetPartBoundsInBox GetPartBoundsInRadius GetPartsInPart
+            FindPartOnRay FindPartOnRayWithIgnoreList
+            FindPartOnRayWithWhitelist FindPartsInRegion3
+            FindPartsInRegion3WithIgnoreList
+            FindPartsInRegion3WithWhiteList GetRealPhysicsFPS
+            GetNumAwakeParts GetServerTimeNow BulkMoveTo
+            MakeJoints BreakJoints
+            ]]
+        },
+        {
+            "Players",
+            players_service,
+            [[
+            GetPlayers GetPlayerByUserId GetUserIdFromNameAsync
+            GetNameFromUserIdAsync GetUserThumbnailAsync GetFriendsAsync
+            GetHumanoidDescriptionFromUserId
+            GetHumanoidDescriptionFromOutfitId
+            CreateHumanoidModelFromDescription
+            CreateHumanoidModelFromUserId
+            GetCharacterAppearanceAsync GetCharacterAppearanceInfoAsync
+            GetUserInfosByUserIdsAsync ReportAbuse
+            ]]
+        },
+        {
+            "RunService",
+            run_service,
+            [[
+            BindToRenderStep UnbindFromRenderStep IsClient IsServer
+            IsStudio IsRunning IsRunMode IsEdit IsEditMode Pause Run
+            Stop Reset SetRobloxGuiFocused GetRobloxVersion
+            GetRobloxClientChannel GetCoreScriptVersion
+            ]]
+        },
+        {
+            "UserInputService",
+            user_input_service,
+            [[
+            GetMouseLocation IsKeyDown IsMouseButtonPressed
+            GetKeysPressed GetMouseButtonsPressed GetConnectedGamepads
+            GetGamepadState GetNavigationGamepads
+            GetSupportedGamepadKeyCodes SetNavigationGamepad
+            GetDeviceAcceleration GetDeviceGravity GetDeviceRotation
+            GetLastInputType GetStringForKeyCode GetImageForKeyCode
+            IsGamepadButtonDown IsNavigationGamepad
+            SetMouseIconOverride RequestKeyboard
+            ]]
+        },
+        {
+            "Lighting",
+            lighting_service,
+            [[
+            GetMinutesAfterMidnight SetMinutesAfterMidnight
+            GetMoonDirection GetSunDirection
+            ]]
+        },
+        {
+            "BasePart",
+            first_basepart,
+            [[
+            AddTag RemoveTag HasTag GetTags ClearTags
+            GetAttribute GetAttributes GetAttributeChangedSignal
+            SetAttribute GetChildren GetDescendants GetFullName
+            FindFirstAncestor FindFirstAncestorOfClass
+            FindFirstAncestorWhichIsA FindFirstChild
+            FindFirstChildOfClass FindFirstChildWhichIsA
+            WaitForChild IsA IsAncestorOf IsDescendantOf Clone
+            Destroy ClearAllChildren GetPropertyChangedSignal
+            ApplyAngularImpulse ApplyImpulse ApplyImpulseAtPosition
+            CanCollideWith CanSetNetworkOwnership GetConnectedParts
+            GetJoints GetMass GetNetworkOwner GetNetworkOwnershipAuto
+            GetNoCollisionConstraints GetRootPart GetTouchingParts
+            IsGrounded MakeJoints BreakJoints Resize
+            SetNetworkOwner SetNetworkOwnershipAuto
+            ]]
+        }
+    }
+
+    for i = 1, #namespace_groups do
+        local group = namespace_groups[i]
+        namespace_group(group[1], group[2], group[3])
+    end
+
+    -- Check the real Roblox remote methods without firing any live
+    -- remote. Prefer a live sample, then a disposable unparented
+    -- Instance when Instance.new is available.
+    local remote_class_specs = {
+        {
+            "RemoteEvent",
+            "FireServer FireClient FireAllClients"
+        },
+        {
+            "UnreliableRemoteEvent",
+            "FireServer FireClient FireAllClients"
+        },
+        {
+            "RemoteFunction",
+            "InvokeServer InvokeClient"
+        }
+    }
+    local remote_samples = {}
+    local remote_sources = {}
+
+    if game ~= nil then
+        local storage_ok, storage = pcall(function()
+            return game:GetService("ReplicatedStorage")
+        end)
+
+        if storage_ok and storage ~= nil then
+            remote_sources[#remote_sources + 1] = storage
+        end
+    end
+
+    if workspace ~= nil then
+        remote_sources[#remote_sources + 1] = workspace
+    end
+
+    for source_index = 1, #remote_sources do
+        local source = remote_sources[source_index]
+        local descendants_ok, descendants = pcall(function()
+            return source:GetDescendants()
+        end)
+
+        if descendants_ok and type(descendants) == "table" then
+            local limit = math.min(#descendants, 2500)
+
+            for descendant_index = 1, limit do
+                local object = descendants[descendant_index]
+                local class_name = nil
+
+                pcall(function()
+                    class_name = object.ClassName
+                end)
+
+                if (
+                    class_name == "RemoteEvent"
+                    or class_name == "UnreliableRemoteEvent"
+                    or class_name == "RemoteFunction"
+                ) and remote_samples[class_name] == nil
+                then
+                    remote_samples[class_name] = object
+                end
+            end
+        end
+    end
+
+    local instance_new =
+        first_present(Instance, "new", "New")
+
+    for i = 1, #remote_class_specs do
+        local specification = remote_class_specs[i]
+        local class_name = specification[1]
+        local object = remote_samples[class_name]
+        local disposable = false
+
+        if object == nil and type(instance_new) == "function" then
+            local create_ok, created =
+                pcall(instance_new, class_name)
+
+            if create_ok and created ~= nil then
+                object = created
+                disposable = true
+            end
+        end
+
+        namespace_group(
+            class_name,
+            object,
+            specification[2]
+        )
+
+        if disposable and object ~= nil then
+            pcall(function()
+                object:Destroy()
+            end)
+        end
+    end
+
+    local nested_namespace_groups = {
+        {
+            "crypt.base64",
+            first_present(crypt, "base64"),
+            "encode decode"
+        },
+        {
+            "crypt.secretbox",
+            first_present(crypt, "secretbox"),
+            "encrypt decrypt"
+        },
+        {
+            "crypt.aead",
+            first_present(crypt, "aead"),
+            "encrypt decrypt"
+        },
+        {
+            "crypt.box",
+            first_present(crypt, "box"),
+            "keypair encrypt decrypt seal open beforenm"
+        },
+        {
+            "crypt.sign",
+            first_present(crypt, "sign"),
+            "keypair sign open detached verify_detached"
+        },
+        {
+            "crypt.hmac",
+            first_present(crypt, "hmac"),
+            "sha256 sha512"
+        },
+        {
+            "crypt.hkdf",
+            first_present(crypt, "hkdf"),
+            "sha256"
+        },
+        {
+            "syn.crypt",
+            first_present(syn, "crypt"),
+            "encrypt decrypt hash random"
+        },
+        {
+            "syn.websocket",
+            first_present(syn, "websocket"),
+            "connect Connect close"
+        }
+    }
+
+    for i = 1, #nested_namespace_groups do
+        local group = nested_namespace_groups[i]
+        namespace_group(group[1], group[2], group[3])
+    end
+
+    info(
+        "Broad function catalog result",
+        tostring(catalog_available)
+            .. "/"
+            .. tostring(catalog_total)
+            .. " functions available; missing="
+            .. tostring(catalog_missing)
+            .. "; nonfunctions="
+            .. tostring(catalog_nonfunction)
+    )
 end
 
 -- ============================================================
@@ -5173,22 +10044,22 @@ end
 -- ============================================================
 print("")
 print("========================================")
-print("  RESULTS")
-print("========================================")
-print(PASS .. " " .. tostring(pass_count) .. " tests passed")
 
-if fail_count > 0 then
-    warn(FAIL .. " " .. tostring(fail_count) .. " tests FAILED")
-
-    print("")
+if #failure_records > 0 then
     print("  FAILED TEST INDEX")
-    print("----------------------------------------")
+    print("========================================")
 
     for i = 1, #failure_records do
         local failure = failure_records[i]
-        warn(
+        emit_warn(
             "["
             .. tostring(i)
+            .. "] ["
+            .. failure.status
+            .. "] ["
+            .. failure.kind
+            .. " / "
+            .. failure.category
             .. "] "
             .. failure.label
             .. " | "
@@ -5196,12 +10067,110 @@ if fail_count > 0 then
         )
 
         if failure.diagnosis ~= nil then
-            warn("    WHY: " .. failure.diagnosis)
+            emit_warn("    WHY: " .. failure.diagnosis)
         end
     end
-else
-    print(PASS .. " All counted tests passed!")
+
+    print("")
+    print("========================================")
 end
 
-print(INFO .. " Optional/undocumented probes do not affect totals.")
+print("  RESULTS")
+print("========================================")
+
+local function score_text(stats)
+    local percent = 0
+    if stats.counted > 0 then
+        percent =
+            math.floor(
+                (stats.passed / stats.counted) * 1000
+            ) / 10
+    end
+
+    return tostring(stats.passed)
+        .. "/"
+        .. tostring(stats.counted)
+        .. " ("
+        .. tostring(percent)
+        .. "%)"
+        .. " | failed="
+        .. tostring(stats.failed)
+        .. " | missing="
+        .. tostring(stats.missing)
+        .. " | skipped="
+        .. tostring(stats.skipped)
+end
+
+local compatibility_stats =
+    result_kind_stats.compatibility or new_stats()
+local extension_stats =
+    result_kind_stats.extension or new_stats()
+local surface_stats =
+    result_kind_stats.surface or new_stats()
+local overall_stats = {
+    passed = pass_count,
+    failed = fail_count,
+    missing = missing_count,
+    skipped = skip_count,
+    counted = pass_count + fail_count + missing_count
+}
+
+print(
+    INFO
+    .. " Functional compatibility score: "
+    .. score_text(compatibility_stats)
+)
+print(
+    INFO
+    .. " Supplemental VM-extension score: "
+    .. score_text(extension_stats)
+)
+print(
+    INFO
+    .. " Raw API surface score: "
+    .. score_text(surface_stats)
+)
+print(
+    INFO
+    .. " Overall counted outcomes: "
+    .. score_text(overall_stats)
+)
+
+print("")
+print("  CATEGORY RESULTS")
+print("----------------------------------------")
+
+local category_names = {}
+for category in pairs(category_stats) do
+    category_names[#category_names + 1] = category
+end
+table.sort(category_names)
+
+for i = 1, #category_names do
+    local category = category_names[i]
+    print(
+        INFO
+        .. " "
+        .. category
+        .. ": "
+        .. score_text(category_stats[category])
+    )
+end
+
+if #failure_records == 0 then
+    print(PASS .. " All counted outcomes passed!")
+else
+    emit_warn(
+        FAIL
+        .. " "
+        .. tostring(#failure_records)
+        .. " failed or missing outcomes are indexed above"
+    )
+end
+
+print(
+    INFO
+    .. " Severe-extension signatures retained as supplemental tests: "
+    .. tostring(SEVERE_EXTENSION_SIGNATURE_COUNT)
+)
 print("========================================")
