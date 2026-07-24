@@ -1,12 +1,5 @@
 -- ==========================================================
--- External Luau VM Capability Lab v4.0
---
---
--- Outcomes are kept distinct:
---   PASS    = the capability exists and the tested behavior worked
---   FAIL    = it exists, but its behavior or return contract was wrong
---   MISSING = no canonical name or accepted alias was found
---   SKIP    = a live fixture or an intentionally disabled test is needed.
+-- External Luau VM Capability Lab v4.2
 -- ==========================================================
 
 local PASS = "[PASS]"
@@ -16,7 +9,7 @@ local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
 local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
-local SUITE_VERSION = "v4.1-behavior-first"
+local SUITE_VERSION = "v4.2-external-only"
 local FAILURE_INDEX_YIELD_INTERVAL = 20
 local NATIVE_WARN = warn
 
@@ -31,8 +24,9 @@ end
 print(INFO .. " External Luau VM Capability Lab: " .. SUITE_VERSION)
 
 -- ============================================================
---                     TEST CONFIGURATION
+--                   TEST CONFIGURATION
 -- ============================================================
+--
 --
 local EXTERNAL_TEST_CONFIG = {
     run_notifications = true,
@@ -59,32 +53,19 @@ local EXTERNAL_TEST_CONFIG = {
     run_memory_changed = true
 }
 
-
 local EXTERNAL_TEST_VALUES = {
     http_get_url = "https://example.com/",
     http_post_url = "https://httpbin.org/post",
     http_post_body = "{\"severe_vm_test\":true}",
     http_post_content_type = "application/json",
     http_post_accept = "application/json",
-
-    -- Keep local_websocket_echo_server.py running before executing
     websocket_url = "ws://127.0.0.1:8765",
-
-    -- A valid address belonging to a disposable test allocation or
-    -- another location you are certain is safe to read.
     memory_read_address = nil,
-
-    -- A valid writable scratch address. The test writes the same value
-    -- it read and then verifies it, minimizing state changes.
     memory_write_address = nil,
-
-    -- Optional specialized addresses. Configure only disposable,
-    -- correctly typed allocations
     memory_string_address = nil,
     memory_vector_address = nil,
     memory_changed_address = nil,
     memory_changed_type = "u8",
-
     memory_buffer_size = 16,
     input_test_key = 0x87
 }
@@ -6218,17 +6199,9 @@ do
         type(base64) == "table"
             and base64
             or nil
-    local syn_crypt =
-        type(syn) == "table"
-            and first_present(syn, "crypt")
-            or nil
     local http_namespace =
         type(http) == "table"
             and http
-            or nil
-    local fluxus_namespace =
-        type(fluxus) == "table"
-            and fluxus
             or nil
 
     capability_test(
@@ -6246,124 +6219,6 @@ do
                     .. type(first)
                     .. ", second="
                     .. type(second)
-        end
-    )
-
-    capability_test(
-        "Environment",
-        "getrenv returns the runtime environment",
-        {
-            {"getrenv", getrenv}
-        },
-        function(fn)
-            local environment = fn()
-            if type(environment) ~= "table" then
-                return false, "returned " .. type(environment)
-            end
-
-            if game ~= nil
-                and environment.game ~= nil
-                and environment.game ~= game
-            then
-                return false, "environment.game identity mismatch"
-            end
-
-            return true
-        end
-    )
-
-    capability_test(
-        "Environment",
-        "getreg returns a nonempty registry table",
-        {
-            {"getreg", getreg},
-            {"debug.getregistry", first_present(debug, "getregistry")}
-        },
-        function(fn)
-            local registry = fn()
-            return type(registry) == "table"
-                and next(registry) ~= nil,
-                "returned "
-                    .. type(registry)
-                    .. ", empty="
-                    .. value_to_string(
-                        type(registry) == "table"
-                            and next(registry) == nil
-                    )
-        end
-    )
-
-    capability_test(
-        "Environment",
-        "getgc exposes live executor-created values",
-        {
-            {"getgc", getgc},
-            {"get_gc_objects", get_gc_objects}
-        },
-        function(fn)
-            local marker = {}
-            local function vm_capability_gc_marker()
-                return marker
-            end
-
-            step_once()
-
-            local values = fn(true)
-            if type(values) ~= "table" then
-                return false, "returned " .. type(values)
-            end
-
-            local found_function =
-                list_contains_identity(
-                    values,
-                    vm_capability_gc_marker
-                )
-            local found_table =
-                list_contains_identity(values, marker)
-
-            return found_function or found_table,
-                "returned "
-                    .. value_to_string(#values)
-                    .. " values; sentinel function="
-                    .. value_to_string(found_function)
-                    .. "; sentinel table="
-                    .. value_to_string(found_table)
-        end
-    )
-
-    capability_test(
-        "Environment",
-        "filtergc finds an exact live sentinel table",
-        {
-            {"filtergc", filtergc},
-            {"filter_gc", filter_gc},
-            {"filterGC", filterGC},
-            {"FilterGC", FilterGC},
-            {"getfiltergc", getfiltergc}
-        },
-        function(fn)
-            local unique =
-                "__vm_capability_filtergc_"
-                .. value_to_string({})
-            local sentinel = {
-                [unique] = unique
-            }
-
-            step_once()
-
-            local result = fn(
-                "table",
-                {
-                    KeyValuePairs = {
-                        [unique] = unique
-                    }
-                },
-                true
-            )
-
-            return result == sentinel,
-                "filter result identity matched="
-                    .. value_to_string(result == sentinel)
         end
     )
 
@@ -6441,20 +6296,6 @@ do
             local value = fn()
             return is_instance(value),
                 "returned " .. type(value)
-        end
-    )
-
-    capability_test(
-        "Closures",
-        "checkcaller identifies the executor thread",
-        {
-            {"checkcaller", checkcaller},
-            {"is_protosmasher_caller", is_protosmasher_caller}
-        },
-        function(fn)
-            local value = fn()
-            return value == true,
-                "returned " .. value_to_string(value)
         end
     )
 
@@ -6599,20 +6440,19 @@ do
 
     capability_test(
         "Closures",
-        "isexecutorclosure recognizes executor-created code",
+        "isexecutorclosure recognizes external-VM-created code",
         {
             {"isexecutorclosure", isexecutorclosure},
             {"checkclosure", checkclosure},
-            {"isourclosure", isourclosure},
-            {"is_synapse_function", is_synapse_function}
+            {"isourclosure", isourclosure}
         },
         function(fn)
-            local function executor_closure()
-                return "executor"
+            local function external_vm_closure()
+                return "external-vm"
             end
 
-            return fn(executor_closure) == true,
-                "executor-created closure was not recognized"
+            return fn(external_vm_closure) == true,
+                "external-VM-created closure was not recognized"
         end
     )
 
@@ -6651,91 +6491,6 @@ do
                     )
                     .. ", distinct="
                     .. value_to_string(first_hash ~= second_hash)
-        end
-    )
-
-    capability_test(
-        "Closures",
-        "hookfunction redirects and restores a private closure",
-        {
-            {"hookfunction", hookfunction},
-            {"replaceclosure", replaceclosure},
-            {"hookfunc", hookfunc},
-            {"hook_function", hook_function}
-        },
-        function(fn)
-            local function target(value)
-                return "original:" .. value
-            end
-
-            local original = fn(target, function(value)
-                return "hooked:" .. value
-            end)
-
-            if type(original) ~= "function" then
-                return false,
-                    "hook returned " .. type(original)
-            end
-
-            local hooked_value = target("x")
-            local restore_ok = pcall(fn, target, original)
-
-            if not restore_ok
-                and type(restorefunction) == "function"
-            then
-                restore_ok = pcall(restorefunction, target)
-            end
-
-            local restored_value = target("x")
-            return hooked_value == "hooked:x"
-                and restore_ok
-                and restored_value == "original:x",
-                "hooked="
-                    .. value_to_string(hooked_value)
-                    .. ", restored="
-                    .. value_to_string(restored_value)
-        end
-    )
-
-    capability_test(
-        "Closures",
-        "restorefunction restores a hooked private closure",
-        {
-            {"restorefunction", restorefunction},
-            {"restorefunc", restorefunc},
-            {"restore_function", restore_function}
-        },
-        function(fn)
-            local hook =
-                dependency_function({
-                    {"hookfunction", hookfunction},
-                    {"replaceclosure", replaceclosure},
-                    {"hookfunc", hookfunc}
-                })
-
-            if type(hook) ~= "function" then
-                return CAPABILITY_SKIP,
-                    "hookfunction is required for verification"
-            end
-
-            local function target()
-                return "restore-original"
-            end
-
-            hook(target, function()
-                return "restore-hooked"
-            end)
-
-            local hooked_value = target()
-            fn(target)
-            local restored_value = target()
-
-            return hooked_value == "restore-hooked"
-                and restored_value == "restore-original",
-                "hooked="
-                    .. value_to_string(hooked_value)
-                    .. ", restored="
-                    .. value_to_string(restored_value)
         end
     )
 
@@ -7533,7 +7288,6 @@ do
         "getcustomasset returns an engine asset URI for a real file",
         {
             {"getcustomasset", getcustomasset},
-            {"getsynasset", getsynasset},
             {"get_custom_asset", get_custom_asset}
         },
         function(fn)
@@ -7570,13 +7324,6 @@ do
                 "crypt.base64.encode",
                 first_present(crypt_base64, "encode")
             },
-            {
-                "syn.crypt.base64.encode",
-                first_present(
-                    first_present(syn_crypt, "base64"),
-                    "encode"
-                )
-            },
             {"base64encode", base64encode},
             {"base64_encode", base64_encode},
             {"base64.encode", first_present(generic_base64, "encode")}
@@ -7599,13 +7346,6 @@ do
             {
                 "crypt.base64.decode",
                 first_present(crypt_base64, "decode")
-            },
-            {
-                "syn.crypt.base64.decode",
-                first_present(
-                    first_present(syn_crypt, "base64"),
-                    "decode"
-                )
             },
             {"base64decode", base64decode},
             {"base64_decode", base64_decode},
@@ -7713,7 +7453,6 @@ do
             },
             {"crypt.sha256", first_present(crypt, "sha256")},
             {"crypt.hash", first_present(crypt, "hash")},
-            {"syn.crypt.hash", first_present(syn_crypt, "hash")},
             {"crypto.hash", first_present(crypto, "hash")}
         },
         function(fn)
@@ -7758,17 +7497,7 @@ do
         {
             {"request", request},
             {"http_request", http_request},
-            {"http.request", first_present(http_namespace, "request")},
-            {
-                "syn.request",
-                type(syn) == "table"
-                    and first_present(syn, "request")
-                    or nil
-            },
-            {
-                "fluxus.request",
-                first_present(fluxus_namespace, "request")
-            }
+            {"http.request", first_present(http_namespace, "request")}
         },
         function(fn)
             if not EXTERNAL_TEST_CONFIG.run_http_get then
@@ -8252,38 +7981,6 @@ do
 
     capability_test(
         "Scripts",
-        "getscriptclosure returns a callable closure",
-        {
-            {"getscriptclosure", getscriptclosure},
-            {"get_script_closure", get_script_closure}
-        },
-        function(fn)
-            local get_scripts =
-                dependency_function({
-                    {"getscripts", getscripts},
-                    {"getrunningscripts", getrunningscripts}
-                })
-
-            if type(get_scripts) ~= "function" then
-                return CAPABILITY_SKIP,
-                    "getscripts is required to find a fixture"
-            end
-
-            local scripts = get_scripts()
-            local target = scripts[1]
-            if target == nil then
-                return CAPABILITY_SKIP,
-                    "no live script fixture was returned"
-            end
-
-            local closure = fn(target)
-            return type(closure) == "function",
-                "returned " .. type(closure)
-        end
-    )
-
-    capability_test(
-        "Scripts",
         "getscripthash returns stable nonempty script hashes",
         {
             {"getscripthash", getscripthash},
@@ -8327,38 +8024,6 @@ do
     )
 
     capability_test(
-        "Scripts",
-        "getsenv returns a script environment table",
-        {
-            {"getsenv", getsenv},
-            {"get_script_env", get_script_env}
-        },
-        function(fn)
-            local get_scripts =
-                dependency_function({
-                    {"getscripts", getscripts},
-                    {"getrunningscripts", getrunningscripts}
-                })
-
-            if type(get_scripts) ~= "function" then
-                return CAPABILITY_SKIP,
-                    "getscripts is required to find a fixture"
-            end
-
-            local scripts = get_scripts()
-            local target = scripts[1]
-            if target == nil then
-                return CAPABILITY_SKIP,
-                    "no live script fixture was returned"
-            end
-
-            local environment = fn(target)
-            return type(environment) == "table",
-                "returned " .. type(environment)
-        end
-    )
-
-    capability_test(
         "Miscellaneous",
         "identifyexecutor returns a usable identity",
         {
@@ -8379,73 +8044,6 @@ do
                     .. value_to_string(name)
                     .. ", version="
                     .. value_to_string(version)
-        end
-    )
-
-    capability_test(
-        "Reflection",
-        "getthreadidentity returns a numeric identity",
-        {
-            {"getthreadidentity", getthreadidentity},
-            {"getidentity", getidentity},
-            {"getthreadcontext", getthreadcontext},
-            {
-                "syn.get_thread_identity",
-                type(syn) == "table"
-                    and first_present(syn, "get_thread_identity")
-                    or nil
-            }
-        },
-        function(fn)
-            local identity = fn()
-            return type(identity) == "number",
-                "returned " .. value_to_string(identity)
-        end
-    )
-
-    capability_test(
-        "Reflection",
-        "setthreadidentity performs a reversible identity round-trip",
-        {
-            {"setthreadidentity", setthreadidentity},
-            {"setidentity", setidentity},
-            {"setthreadcontext", setthreadcontext},
-            {
-                "syn.set_thread_identity",
-                type(syn) == "table"
-                    and first_present(syn, "set_thread_identity")
-                    or nil
-            }
-        },
-        function(fn)
-            local get_identity =
-                dependency_function({
-                    {"getthreadidentity", getthreadidentity},
-                    {"getidentity", getidentity},
-                    {"getthreadcontext", getthreadcontext}
-                })
-
-            if type(get_identity) ~= "function" then
-                return CAPABILITY_SKIP,
-                    "getthreadidentity is required for verification"
-            end
-
-            local original = get_identity()
-            if type(original) ~= "number" then
-                return false,
-                    "original identity is "
-                    .. type(original)
-            end
-
-            fn(original)
-            local observed = get_identity()
-            pcall(fn, original)
-
-            return observed == original,
-                "original="
-                    .. value_to_string(original)
-                    .. ", observed="
-                    .. value_to_string(observed)
         end
     )
 
@@ -8904,7 +8502,7 @@ do
 end
 
 -- ============================================================
--- 38. BROAD UNSUPPORTED-FUNCTION CATALOG
+-- 38. BROAD EXTERNAL FUNCTION CATALOG
 -- ============================================================
 section(
     "38. Broad External Function Surface Catalog",
@@ -8913,9 +8511,9 @@ section(
 )
 
 -- This section is intentionally lightweight. It only reads function
--- members; it does not recursively scan getgc/getreg, create hundreds
--- of Instances, or call arbitrary executor functions. Missing names
--- are grouped into compact lines so console output stays manageable.
+-- members; it does not create hundreds of Instances or invoke arbitrary
+-- host functions. Roblox-VM-only APIs, server-authority-only calls,
+-- and executor-brand aliases are excluded from the catalog and totals.
 do
     local catalog_total = 0
     local catalog_available = 0
@@ -9005,24 +8603,11 @@ do
         {"UserSettings", UserSettings},
         {"PluginManager", PluginManager},
         {"getgenv", getgenv},
-        {"getrenv", getrenv},
-        {"getsenv", getsenv},
-        {"getreg", getreg},
-        {"getgc", getgc},
-        {"filtergc", filtergc},
-        {"filter_gc", filter_gc},
-        {"filterGC", filterGC},
-        {"FilterGC", FilterGC},
-        {"getfiltergc", getfiltergc},
         {"getinstances", getinstances},
         {"getnilinstances", getnilinstances},
         {"getscripts", getscripts},
         {"getrunningscripts", getrunningscripts},
         {"getloadedmodules", getloadedmodules},
-        {"getcallingscript", getcallingscript},
-        {"getscriptfromthread", getscriptfromthread},
-        {"getscriptclosure", getscriptclosure},
-        {"getscriptfunction", getscriptfunction},
         {"getscriptbytecode", getscriptbytecode},
         {"getscripthash", getscripthash},
         {"dumpstring", dumpstring},
@@ -9040,18 +8625,10 @@ do
         {"invoke_server", invoke_server},
         {"invokeServer", invokeServer},
         {"InvokeServer", InvokeServer},
-        {"fireclient", fireclient},
-        {"fireClient", fireClient},
-        {"FireClient", FireClient},
-        {"fireallclients", fireallclients},
-        {"fireAllClients", fireAllClients},
-        {"FireAllClients", FireAllClients},
         {"remotespy", remotespy},
         {"remote_spy", remote_spy},
         {"remoteSpy", remoteSpy},
         {"RemoteSpy", RemoteSpy},
-        {"simplespy", simplespy},
-        {"SimpleSpy", SimpleSpy},
         {"startremotespy", startremotespy},
         {"stopremotespy", stopremotespy},
         {"spyremote", spyremote},
@@ -9060,17 +8637,12 @@ do
         {"getremotes", getremotes},
         {"getremoteevents", getremoteevents},
         {"getremotefunctions", getremotefunctions},
-        {"hookfunction", hookfunction},
-        {"replaceclosure", replaceclosure},
-        {"hookmetamethod", hookmetamethod},
-        {"restorefunction", restorefunction},
         {"clonefunction", clonefunction},
         {"newcclosure", newcclosure},
         {"iscclosure", iscclosure},
         {"islclosure", islclosure},
         {"isexecutorclosure", isexecutorclosure},
         {"isourclosure", isourclosure},
-        {"checkcaller", checkcaller},
         {"getfunctionhash", getfunctionhash},
         {"comparefunction", comparefunction},
         {"getupvalue", getupvalue},
@@ -9092,8 +8664,6 @@ do
         {"make_writeable", make_writeable},
         {"makereadonly", makereadonly},
         {"makewriteable", makewriteable},
-        {"getnamecallmethod", getnamecallmethod},
-        {"setnamecallmethod", setnamecallmethod},
         {"cloneref", cloneref},
         {"compareinstances", compareinstances},
         {"gethiddenproperty", gethiddenproperty},
@@ -9104,14 +8674,6 @@ do
         {"isscriptable", isscriptable},
         {"setscriptable", setscriptable},
         {"ispropertyscriptable", ispropertyscriptable},
-        {"getthreadidentity", getthreadidentity},
-        {"setthreadidentity", setthreadidentity},
-        {"getidentity", getidentity},
-        {"setidentity", setidentity},
-        {"getthreadcontext", getthreadcontext},
-        {"setthreadcontext", setthreadcontext},
-        {"getcontext", getcontext},
-        {"setcontext", setcontext},
         {"isnetworkowner", isnetworkowner},
         {"setsimulationradius", setsimulationradius},
         {"getsimulationradius", getsimulationradius},
@@ -9127,7 +8689,6 @@ do
         {"deletefile", deletefile},
         {"deletefolder", deletefolder},
         {"getcustomasset", getcustomasset},
-        {"getsynasset", getsynasset},
         {"getasset", getasset},
         {"request", request},
         {"http_request", http_request},
@@ -9331,7 +8892,7 @@ do
             setmemorycategory traceback getconstant getconstants
             setconstant getproto getprotos getupvalue getupvalues
             setupvalue getstack setstack getinfo getlocal setlocal
-            getregistry getmetatable setmetatable gethook sethook
+            getmetatable setmetatable gethook sethook
             upvalueid upvaluejoin
             ]]
         },
@@ -9684,89 +9245,6 @@ do
             ]]
         },
         {
-            "syn",
-            syn,
-            [[
-            request http_request queue_on_teleport protect_gui
-            unprotect_gui get_thread_identity set_thread_identity
-            getgenv getrenv getreg getgc getinstances
-            getnilinstances getconnections fire_signal secure_call
-            cache_replace cache_invalidate cache_iscached
-            ]]
-        },
-        {
-            "fluxus",
-            fluxus,
-            [[
-            request queue_on_teleport getcustomasset
-            getthreadidentity setthreadidentity
-            ]]
-        },
-        {
-            "krnl",
-            krnl,
-            [[
-            request queue_on_teleport getcustomasset
-            getthreadidentity setthreadidentity
-            ]]
-        },
-        {
-            "delta",
-            delta,
-            [[
-            request queue_on_teleport getcustomasset
-            ]]
-        },
-        {
-            "electron",
-            electron,
-            [[
-            request queue_on_teleport getcustomasset
-            ]]
-        },
-        {
-            "solara",
-            solara,
-            [[
-            request queue_on_teleport getcustomasset
-            ]]
-        },
-        {
-            "wave",
-            wave,
-            [[
-            request queue_on_teleport getcustomasset
-            ]]
-        },
-        {
-            "codex",
-            codex,
-            [[
-            request queue_on_teleport getcustomasset
-            ]]
-        },
-        {
-            "oxygen",
-            oxygen,
-            [[
-            request queue_on_teleport
-            ]]
-        },
-        {
-            "sentinel",
-            sentinel,
-            [[
-            request queue_on_teleport
-            ]]
-        },
-        {
-            "scriptware",
-            scriptware,
-            [[
-            request queue_on_teleport
-            ]]
-        },
-        {
             "RemoteSpy",
             (
                 type(RemoteSpy) == "table"
@@ -9787,7 +9265,7 @@ do
             game,
             [[
             GetService FindService GetObjects HttpGet HttpGetAsync
-            HttpPost HttpPostAsync IsLoaded BindToClose GetJobsInfo
+            HttpPost HttpPostAsync IsLoaded GetJobsInfo
             GetEngineFeature SetEngineFeature GetFastFlag
             SetFastFlagForTesting
             ]]
@@ -9825,8 +9303,8 @@ do
             run_service,
             [[
             BindToRenderStep UnbindFromRenderStep IsClient IsServer
-            IsStudio IsRunning IsRunMode IsEdit IsEditMode Pause Run
-            Stop Reset SetRobloxGuiFocused GetRobloxVersion
+            IsStudio IsRunning IsRunMode IsEdit IsEditMode
+            SetRobloxGuiFocused GetRobloxVersion
             GetRobloxClientChannel GetCoreScriptVersion
             ]]
         },
@@ -9865,11 +9343,10 @@ do
             WaitForChild IsA IsAncestorOf IsDescendantOf Clone
             Destroy ClearAllChildren GetPropertyChangedSignal
             ApplyAngularImpulse ApplyImpulse ApplyImpulseAtPosition
-            CanCollideWith CanSetNetworkOwnership GetConnectedParts
-            GetJoints GetMass GetNetworkOwner GetNetworkOwnershipAuto
+            CanCollideWith GetConnectedParts
+            GetJoints GetMass
             GetNoCollisionConstraints GetRootPart GetTouchingParts
             IsGrounded MakeJoints BreakJoints Resize
-            SetNetworkOwner SetNetworkOwnershipAuto
             ]]
         }
     }
@@ -9885,15 +9362,15 @@ do
     local remote_class_specs = {
         {
             "RemoteEvent",
-            "FireServer FireClient FireAllClients"
+            "FireServer"
         },
         {
             "UnreliableRemoteEvent",
-            "FireServer FireClient FireAllClients"
+            "FireServer"
         },
         {
             "RemoteFunction",
-            "InvokeServer InvokeClient"
+            "InvokeServer"
         }
     }
     local remote_samples = {}
@@ -10014,16 +9491,6 @@ do
             "crypt.hkdf",
             first_present(crypt, "hkdf"),
             "sha256"
-        },
-        {
-            "syn.crypt",
-            first_present(syn, "crypt"),
-            "encrypt decrypt hash random"
-        },
-        {
-            "syn.websocket",
-            first_present(syn, "websocket"),
-            "connect Connect close"
         }
     }
 
