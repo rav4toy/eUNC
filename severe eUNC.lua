@@ -1,11 +1,12 @@
 -- ==========================================================
--- External Luau VM Capability Lab v4.3
+-- External Luau VM Capability Lab v4.4
 --
 -- Outcomes are kept distinct:
 --   PASS    = the capability exists and the tested behavior worked
 --   FAIL    = it exists, but its behavior or return contract was wrong
 --   MISSING = no canonical name or accepted alias was found
 --   SKIP    = a live fixture or an intentionally disabled test is needed
+--
 -- ==========================================================
 
 local PASS = "[PASS]"
@@ -15,7 +16,7 @@ local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
 local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
-local SUITE_VERSION = "v4.3-loadstring-config"
+local SUITE_VERSION = "v4.4"
 local FAILURE_INDEX_YIELD_INTERVAL = 20
 local NATIVE_WARN = warn
 local LOADSTRING_CONFIG_OVERRIDE, LOADSTRING_VALUES_OVERRIDE = ...
@@ -31,10 +32,9 @@ end
 print(INFO .. " External Luau VM Capability Lab: " .. SUITE_VERSION)
 
 -- ============================================================
--- EXHAUSTIVE TEST CONFIGURATION
+--                    TEST CONFIGURATION
 -- ============================================================
 --
--- Everything below is deliberately enabled except WebSocket.
 --
 local EXTERNAL_TEST_CONFIG = {
     run_notifications = true,
@@ -61,6 +61,7 @@ local EXTERNAL_TEST_CONFIG = {
     run_memory_changed = true
 }
 
+-- Change these only when enabling the matching tests.
 local EXTERNAL_TEST_VALUES = {
     http_get_url = "https://example.com/",
     http_post_url = "https://httpbin.org/post",
@@ -1175,9 +1176,9 @@ for i = 1, #misc_functions do
     check(entry[1] .. " is a function", type(entry[2]) == "function")
 end
 
-local menu_function = is_menu_opened or ismenuopened
+local menu_function = ismenuopened or is_menu_opened
 check(
-    "is_menu_opened/ismenuopened is available",
+    "ismenuopened/is_menu_opened is available",
     type(menu_function) == "function"
 )
 
@@ -1690,6 +1691,7 @@ if drawing_ready then
             triangle.PointC = Vector2.new(150, 200)
             triangle.Color = Color3.new(1, 0.4, 0.2)
             triangle.Opacity = 1
+            triangle.Transparency = 0
             triangle.Thickness = 2
             triangle.Filled = true
             triangle.Visible = false
@@ -1733,39 +1735,122 @@ if type(task) == "table"
     and type(task.spawn) == "function"
     and type(task.defer) == "function"
     and type(task.delay) == "function"
+    and type(task.cancel) == "function"
     and type(task.wait) == "function"
 then
     local spawn_fired = false
-    local spawn_ok, spawn_thread = pcall(task.spawn, function()
-        spawn_fired = true
-    end)
+    local spawn_argument_a = nil
+    local spawn_argument_b = nil
+    local spawn_ok, spawn_thread = pcall(
+        task.spawn,
+        function(a, b)
+            spawn_fired = true
+            spawn_argument_a = a
+            spawn_argument_b = b
+        end,
+        123,
+        "spawn-ok"
+    )
 
     check(
         "task.spawn returns a thread",
         spawn_ok and type(spawn_thread) == "thread",
         spawn_thread
     )
+    check(
+        "task.spawn forwards function arguments",
+        spawn_fired
+            and spawn_argument_a == 123
+            and spawn_argument_b == "spawn-ok",
+        "received "
+            .. value_to_string(spawn_argument_a)
+            .. ", "
+            .. value_to_string(spawn_argument_b)
+    )
+
+    local spawned_coroutine_argument = nil
+    local raw_spawn_thread = coroutine.create(function(value)
+        spawned_coroutine_argument = value
+    end)
+    local spawn_thread_ok, returned_spawn_thread =
+        pcall(task.spawn, raw_spawn_thread, "thread-ok")
+
+    check(
+        "task.spawn accepts a coroutine thread",
+        spawn_thread_ok
+            and type(returned_spawn_thread) == "thread"
+            and spawned_coroutine_argument == "thread-ok",
+        returned_spawn_thread
+    )
 
     local defer_fired = false
-    local defer_ok, defer_thread = pcall(task.defer, function()
-        defer_fired = true
-    end)
+    local defer_argument = nil
+    local defer_ok, defer_thread = pcall(
+        task.defer,
+        function(value)
+            defer_fired = true
+            defer_argument = value
+        end,
+        "defer-ok"
+    )
 
     check(
         "task.defer returns a thread",
         defer_ok and type(defer_thread) == "thread",
         defer_thread
     )
+    check(
+        "task.defer waits until the current thread yields",
+        defer_fired == false,
+        "callback fired before a yield="
+            .. value_to_string(defer_fired)
+    )
+
+    local deferred_coroutine_argument = nil
+    local raw_defer_thread = coroutine.create(function(value)
+        deferred_coroutine_argument = value
+    end)
+    local defer_thread_ok, returned_defer_thread =
+        pcall(task.defer, raw_defer_thread, "thread-ok")
+
+    check(
+        "task.defer accepts a coroutine thread",
+        defer_thread_ok and type(returned_defer_thread) == "thread",
+        returned_defer_thread
+    )
 
     local delay_fired = false
-    local delay_ok, delay_thread = pcall(task.delay, 0, function()
-        delay_fired = true
-    end)
+    local delay_argument_a = nil
+    local delay_argument_b = nil
+    local delay_ok, delay_thread = pcall(
+        task.delay,
+        0,
+        function(a, b)
+            delay_fired = true
+            delay_argument_a = a
+            delay_argument_b = b
+        end,
+        456,
+        "delay-ok"
+    )
 
     check(
         "task.delay returns a thread",
         delay_ok and type(delay_thread) == "thread",
         delay_thread
+    )
+
+    local delayed_coroutine_argument = nil
+    local raw_delay_thread = coroutine.create(function(value)
+        delayed_coroutine_argument = value
+    end)
+    local delay_thread_ok, returned_delay_thread =
+        pcall(task.delay, 0, raw_delay_thread, "thread-ok")
+
+    check(
+        "task.delay accepts a coroutine thread",
+        delay_thread_ok and type(returned_delay_thread) == "thread",
+        returned_delay_thread
     )
 
     local wait_ok, elapsed = pcall(task.wait, 0)
@@ -1775,23 +1860,144 @@ then
         elapsed
     )
 
-    check("task.spawn callback fired", spawn_fired == true)
-    check("task.defer callback fired after yielding", defer_fired == true)
-    check("task.delay callback fired after yielding", delay_fired == true)
+    local default_wait_ok, default_elapsed = pcall(task.wait)
+    check(
+        "task.wait() default-duration form returns number",
+        default_wait_ok and type(default_elapsed) == "number",
+        default_elapsed
+    )
 
-    if type(task.cancel) == "function" then
-        local cancel_ok, cancel_thread = pcall(task.delay, 60, function()
-            emit_warn(FAIL .. " Cancelled delayed task unexpectedly fired")
+    check("task.spawn callback fired", spawn_fired == true)
+
+    if spawn_ok and type(spawn_thread) == "thread" then
+        local cancel_completed_ok, cancel_completed_error =
+            pcall(task.cancel, spawn_thread)
+
+        check(
+            "task.cancel ignores an already completed thread",
+            cancel_completed_ok,
+            cancel_completed_error
+        )
+    end
+
+    check(
+        "task.defer callback fired after yielding",
+        defer_fired == true and defer_argument == "defer-ok",
+        defer_argument
+    )
+    check(
+        "task.defer coroutine resumed after yielding",
+        deferred_coroutine_argument == "thread-ok",
+        deferred_coroutine_argument
+    )
+    check(
+        "task.delay callback fired after yielding",
+        delay_fired
+            and delay_argument_a == 456
+            and delay_argument_b == "delay-ok",
+        "received "
+            .. value_to_string(delay_argument_a)
+            .. ", "
+            .. value_to_string(delay_argument_b)
+    )
+    check(
+        "task.delay coroutine resumed after yielding",
+        delayed_coroutine_argument == "thread-ok",
+        delayed_coroutine_argument
+    )
+
+    local delayed_cancel_fired = false
+    local cancel_ok, cancel_thread = pcall(task.delay, 60, function()
+        delayed_cancel_fired = true
+    end)
+
+    if cancel_ok and type(cancel_thread) == "thread" then
+        local did_cancel, cancel_error = pcall(task.cancel, cancel_thread)
+        check("task.cancel accepts delayed thread", did_cancel, cancel_error)
+
+        local cancel_again_ok, cancel_again_error =
+            pcall(task.cancel, cancel_thread)
+        check(
+            "task.cancel ignores an already cancelled thread",
+            cancel_again_ok,
+            cancel_again_error
+        )
+
+        task.wait(0)
+        check(
+            "task.cancel keeps delayed callback cancelled",
+            delayed_cancel_fired == false,
+            "callback fired=" .. value_to_string(delayed_cancel_fired)
+        )
+    else
+        check("create delayed thread for task.cancel test", false, cancel_thread)
+    end
+
+    local deferred_cancel_fired = false
+    local deferred_cancel_ok, deferred_cancel_thread =
+        pcall(task.defer, function()
+            deferred_cancel_fired = true
         end)
 
-        if cancel_ok and type(cancel_thread) == "thread" then
-            local did_cancel, cancel_error = pcall(task.cancel, cancel_thread)
-            check("task.cancel accepts delayed thread", did_cancel, cancel_error)
-        else
-            check("create delayed thread for task.cancel test", false, cancel_thread)
-        end
+    if deferred_cancel_ok
+        and type(deferred_cancel_thread) == "thread"
+    then
+        local did_cancel, cancel_error =
+            pcall(task.cancel, deferred_cancel_thread)
+
+        check(
+            "task.cancel accepts deferred thread",
+            did_cancel,
+            cancel_error
+        )
+        task.wait(0)
+        check(
+            "task.cancel prevents deferred callback",
+            deferred_cancel_fired == false,
+            "callback fired=" .. value_to_string(deferred_cancel_fired)
+        )
+    else
+        check(
+            "create deferred thread for task.cancel test",
+            false,
+            deferred_cancel_thread
+        )
+    end
+
+    local spawned_cancel_resumed = false
+    local spawned_cancel_ok, spawned_cancel_thread =
+        pcall(task.spawn, function()
+            task.wait(60)
+            spawned_cancel_resumed = true
+        end)
+
+    if spawned_cancel_ok
+        and type(spawned_cancel_thread) == "thread"
+    then
+        local did_cancel, cancel_error =
+            pcall(task.cancel, spawned_cancel_thread)
+
+        check(
+            "task.cancel accepts spawned thread",
+            did_cancel,
+            cancel_error
+        )
+        task.wait(0)
+        check(
+            "task.cancel prevents spawned thread resumption",
+            spawned_cancel_resumed == false,
+            "thread resumed="
+                .. value_to_string(spawned_cancel_resumed)
+        )
+    else
+        check(
+            "create spawned thread for task.cancel test",
+            false,
+            spawned_cancel_thread
+        )
     end
 end
+
 
 -- ============================================================
 -- 11. PASSIVE INPUT API
@@ -2025,6 +2231,10 @@ check("CFrame.lookAt is a function", CFrame ~= nil and type(CFrame.lookAt) == "f
 check(
     "CFrame.fromAxisAngle is a function",
     CFrame ~= nil and type(CFrame.fromAxisAngle) == "function"
+)
+check(
+    "CFrame.fromOrientation is a function",
+    CFrame ~= nil and type(CFrame.fromOrientation) == "function"
 )
 
 if CFrame ~= nil
@@ -2779,6 +2989,45 @@ then
         return cf ~= nil
     end)
 
+    test("CFrame quaternion constructor works", function()
+        local cf = CFrame.new(
+            1,
+            2,
+            3,
+            0,
+            0,
+            0,
+            1
+        )
+
+        return cf ~= nil
+            and cf.X == 1
+            and cf.Y == 2
+            and cf.Z == 3
+    end)
+
+    test("CFrame rotation-matrix constructor works", function()
+        local cf = CFrame.new(
+            1,
+            2,
+            3,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            1
+        )
+
+        return cf ~= nil
+            and cf.X == 1
+            and cf.Y == 2
+            and cf.Z == 3
+    end)
+
     if type(CFrame.fromEulerAnglesXYZ) == "function" then
         test("CFrame.fromEulerAnglesXYZ numbers works", function()
             return CFrame.fromEulerAnglesXYZ(0.1, 0.2, 0.3) ~= nil
@@ -3146,9 +3395,9 @@ if type(Drawing) == "table" and type(Drawing.new) == "function" then
             text_object.Size = 16
             text_object.Center = false
             text_object.Outline = true
-            text_object.OutlineColor = Color3.new(0, 0, 0)
+            text_object.OutlineColor = Vector3.new(0, 0, 0)
             text_object.Position = Vector2.new(50, 50)
-            text_object.Font = "Tamzen"
+            text_object.Font = 0
 
             local unused = text_object.TextBounds
             return true
@@ -3474,6 +3723,7 @@ local immediate_function_names = {
     "Polyline",
     "Text",
     "OutlinedText",
+    "Image",
     "GetTextBounds"
 }
 
@@ -3488,13 +3738,6 @@ if type(DrawingImmediate) == "table" then
             type(function_value) == "function"
         )
     end
-
-    info(
-        "DrawingImmediate.Image",
-        type(first_present(DrawingImmediate, "Image"))
-            .. " (documentation says this is planned and not working yet)"
-    )
-
 
     if type(DrawingImmediate.GetTextBounds) == "function" then
         test("DrawingImmediate.GetTextBounds returns Vector2-like value", function()
@@ -3674,40 +3917,24 @@ if game ~= nil then
         return type(game.JobId) == "string", game.JobId
     end)
 
-    local get_ping = first_present(game, "GetPing")
-    check("game:GetPing exists", type(get_ping) == "function")
+    test("game:GetPing returns number", function()
+        local ping = game:GetPing()
+        return type(ping) == "number", ping
+    end)
 
-    if type(get_ping) == "function" then
-        test("game:GetPing returns number", function()
-            local ping = get_ping(game)
-            return type(ping) == "number", ping
-        end)
-    end
-
-    local get_hwid = first_present(game, "GetHwid")
-    check("game:GetHwid exists", type(get_hwid) == "function")
-
-    if EXTERNAL_TEST_CONFIG.run_hwid_read and type(get_hwid) == "function" then
+    if EXTERNAL_TEST_CONFIG.run_hwid_read then
         test("game:GetHwid returns non-empty string", function()
-            local hwid = get_hwid(game)
+            local hwid = game:GetHwid()
             return type(hwid) == "string" and #hwid > 0
         end)
     else
-        info("game:GetHwid active test", "disabled to avoid printing device identity")
+        info(
+            "game:GetHwid active test",
+            "disabled to avoid reading device identity"
+        )
     end
 
-    check(
-        "game:HttpGet exists",
-        type(first_present(game, "HttpGet")) == "function"
-    )
-    check(
-        "game:HttpPost exists",
-        type(first_present(game, "HttpPost")) == "function"
-    )
-
-    if EXTERNAL_TEST_CONFIG.run_http_get
-        and type(first_present(game, "HttpGet")) == "function"
-    then
+    if EXTERNAL_TEST_CONFIG.run_http_get then
         test("game:HttpGet returns a string", function()
             local response = game:HttpGet(
                 EXTERNAL_TEST_VALUES.http_get_url
@@ -3716,9 +3943,7 @@ if game ~= nil then
         end)
     end
 
-    if EXTERNAL_TEST_CONFIG.run_http_post
-        and type(first_present(game, "HttpPost")) == "function"
-    then
+    if EXTERNAL_TEST_CONFIG.run_http_post then
         test("game:HttpPost returns a string", function()
             local attempts = {
                 {
@@ -3819,6 +4044,33 @@ if extended_camera ~= nil then
         return true, subject
     end)
 
+    if EXTERNAL_TEST_CONFIG.run_live_instance_mutation then
+        test("Camera documented writable properties accept old values", function()
+            local old_position = camera.Position
+            local old_cframe = camera.CFrame
+            local old_velocity = camera.Velocity
+            local old_right = camera.RightVector
+            local old_up = camera.UpVector
+            local old_look = camera.LookVector
+            local old_subject = camera.CameraSubject
+
+            camera.Position = old_position
+            camera.CFrame = old_cframe
+            camera.Velocity = old_velocity
+            camera.RightVector = old_right
+            camera.UpVector = old_up
+            camera.LookVector = old_look
+            camera.CameraSubject = old_subject
+
+            return true
+        end)
+    else
+        info(
+            "Camera mutation tests",
+            "disabled; documented writable properties are only read"
+        )
+    end
+
     if first_basepart ~= nil then
         test("Camera WorldToScreenPoint works on BasePart", function()
             local screen, visible =
@@ -3877,6 +4129,7 @@ if first_basepart ~= nil then
             local old_position = first_basepart.Position
             local old_cframe = first_basepart.CFrame
             local old_velocity = first_basepart.Velocity
+            local old_description = first_basepart.Description
 
             first_basepart.CanCollide = old_can_collide
             first_basepart.Transparency = old_transparency
@@ -3884,6 +4137,7 @@ if first_basepart ~= nil then
             first_basepart.Position = old_position
             first_basepart.CFrame = old_cframe
             first_basepart.Velocity = old_velocity
+            first_basepart.Description = old_description
 
             return true
         end)
@@ -3947,6 +4201,23 @@ if first_mesh_object ~= nil then
         local value = first_mesh_object.MeshId
         return type(value) == "string", value
     end)
+
+    if EXTERNAL_TEST_CONFIG.run_live_instance_mutation then
+        test("Mesh TextureId and MeshId accept old values", function()
+            local old_texture = first_mesh_object.TextureId
+            local old_mesh = first_mesh_object.MeshId
+
+            first_mesh_object.TextureId = old_texture
+            first_mesh_object.MeshId = old_mesh
+
+            return true
+        end)
+    else
+        info(
+            "Mesh mutation tests",
+            "disabled; TextureId and MeshId are only read"
+        )
+    end
 else
     info(
         "Mesh TextureId/MeshId tests",
@@ -3965,6 +4236,23 @@ if first_humanoid ~= nil then
         return type(first_humanoid.MaxHealth) == "number",
             first_humanoid.MaxHealth
     end)
+
+    if EXTERNAL_TEST_CONFIG.run_live_instance_mutation then
+        test("Humanoid Health and MaxHealth accept old values", function()
+            local old_health = first_humanoid.Health
+            local old_max_health = first_humanoid.MaxHealth
+
+            first_humanoid.Health = old_health
+            first_humanoid.MaxHealth = old_max_health
+
+            return true
+        end)
+    else
+        info(
+            "Humanoid mutation tests",
+            "disabled; Health and MaxHealth are only read"
+        )
+    end
 else
     info("Humanoid tests", "skipped because no Humanoid was found")
 end
@@ -4005,6 +4293,19 @@ if valuebase_found ~= nil then
         local unused = valuebase_found.Value
         return true
     end)
+
+    if EXTERNAL_TEST_CONFIG.run_live_instance_mutation then
+        test("ValueBase.Value accepts its old value", function()
+            local old_value = valuebase_found.Value
+            valuebase_found.Value = old_value
+            return true
+        end)
+    else
+        info(
+            "ValueBase mutation test",
+            "disabled; Value is only read"
+        )
+    end
 else
     info("ValueBase test", "skipped because no ValueBase was found")
 end
@@ -5529,8 +5830,10 @@ if EXTERNAL_TEST_CONFIG.run_websocket then
                 websocket.Url
         end)
 
-        -- Confirm the observed runtime shape. DataReceived is a
-        -- callback-registration function, not a Signal object.
+        -- The GitBook currently documents DataReceived as a Signal
+        -- property using `.DataReceived:Connect(...)`. The tested Severe
+        -- build exposes a callback-registration function instead, so this
+        -- runtime-specific compatibility path remains intentionally tested.
         test("WebsocketClient.DataReceived is a function", function()
             return type(websocket.DataReceived) == "function",
                 type(websocket.DataReceived)
@@ -7428,10 +7731,6 @@ do
         "base64 encode returns the canonical vector",
         {
             {
-                "crypt.base64encode",
-                first_present(crypt, "base64encode", "base64_encode")
-            },
-            {
                 "crypt.base64.encode",
                 first_present(crypt_base64, "encode")
             },
@@ -7450,10 +7749,6 @@ do
         "Encoding",
         "base64 decode reverses the canonical vector",
         {
-            {
-                "crypt.base64decode",
-                first_present(crypt, "base64decode", "base64_decode")
-            },
             {
                 "crypt.base64.decode",
                 first_present(crypt_base64, "decode")
@@ -8621,10 +8916,11 @@ section(
     "API Surface"
 )
 
--- This section is intentionally lightweight. It only reads function
--- members; it does not create hundreds of Instances or invoke arbitrary
--- host functions. Roblox-VM-only APIs, server-authority-only calls,
--- and executor-brand aliases are excluded from the catalog and totals.
+-- This section reads ordinary namespace functions directly. Instance
+-- methods that an external VM may expose only through Luau NAMECALL are
+-- exercised with literal ':' calls on safe or disposable fixtures.
+-- Roblox-VM-only APIs, server-authority-only calls, and executor-brand
+-- aliases are excluded from the catalog and totals.
 do
     local catalog_total = 0
     local catalog_available = 0
@@ -8664,6 +8960,86 @@ do
                 "API path: " .. path,
                 "FAIL",
                 "expected function, got " .. type(value),
+                "surface",
+                true
+            )
+        end
+    end
+
+    local function missing_namecall_error(error_value)
+        local message = string.lower(tostring(error_value))
+
+        return contains_plain(message, "attempt to call a nil value")
+            or contains_plain(message, "attempt to index nil")
+            or contains_plain(message, "missing method")
+            or contains_plain(message, "unknown method")
+            or contains_plain(message, "method not found")
+            or contains_plain(message, "not a valid member")
+            or contains_plain(message, "no basepart fixture")
+            or contains_plain(message, "no userinputservice fixture")
+    end
+
+    local function catalog_namecall_probe(
+        path,
+        callback,
+        accept_nonmissing_error
+    )
+        if seen_catalog_names[path] then
+            return
+        end
+
+        seen_catalog_names[path] = true
+        catalog_total = catalog_total + 1
+
+        if type(callback) ~= "function" then
+            catalog_missing = catalog_missing + 1
+            record_result(
+                "API path: " .. path,
+                "MISSING",
+                "no namecall probe is available",
+                "surface",
+                true
+            )
+            return
+        end
+
+        local ok, result = pcall(callback)
+
+        if ok then
+            catalog_available = catalog_available + 1
+            record_result(
+                "API path: " .. path,
+                "PASS",
+                "method is available through ':' namecall",
+                "surface",
+                true
+            )
+        elseif missing_namecall_error(result) then
+            catalog_missing = catalog_missing + 1
+            record_result(
+                "API path: " .. path,
+                "MISSING",
+                "namecall method is missing: " .. tostring(result),
+                "surface",
+                true
+            )
+        elseif accept_nonmissing_error then
+            catalog_available = catalog_available + 1
+            record_result(
+                "API path: " .. path,
+                "PASS",
+                "method reached argument validation through ':' namecall: "
+                    .. tostring(result),
+                "surface",
+                true
+            )
+        else
+            catalog_nonfunction = catalog_nonfunction + 1
+            record_result(
+                "API path: " .. path,
+                "FAIL",
+                "namecall exists but execution failed: "
+                    .. tostring(result),
                 "surface",
                 true
             )
@@ -8826,6 +9202,12 @@ do
         {"isgameactive", isgameactive},
         {"iswindowactive", iswindowactive},
         {"getmouseposition", getmouseposition},
+        {"getpressedkey", getpressedkey},
+        {"getpressedkeys", getpressedkeys},
+        {"isleftclicked", isleftclicked},
+        {"isrightclicked", isrightclicked},
+        {"isleftpressed", isleftpressed},
+        {"isrightpressed", isrightpressed},
         {"keypress", keypress},
         {"keyrelease", keyrelease},
         {"mouse1click", mouse1click},
@@ -8894,6 +9276,12 @@ do
         {"gzipdecompress", gzipdecompress},
         {"compress", compress},
         {"decompress", decompress},
+        {"pointer_to_userdata", pointer_to_userdata},
+        {"get_overlay_fps", get_overlay_fps},
+        {"is_forcefield_check_active", is_forcefield_check_active},
+        {"is_local_health_check_active", is_local_health_check_active},
+        {"is_team_check_active", is_team_check_active},
+        {"ismenuopened", ismenuopened},
         {"send_notification", send_notification},
         {"block_roblox_window", block_roblox_window},
         {"add_model_data", add_model_data},
@@ -9054,14 +9442,14 @@ do
             CFrame,
             [[
             new Angles fromAxisAngle fromEulerAnglesXYZ
-            fromEulerAnglesYXZ fromMatrix lookAt
+            fromEulerAnglesYXZ fromOrientation fromMatrix lookAt
             ]]
         },
         {
             "Color3",
             Color3,
             [[
-            new fromRGB fromHSV toHSV
+            new fromRGB fromHSV fromHex
             ]]
         },
         {
@@ -9264,6 +9652,62 @@ do
             ]]
         },
         {
+            "Circle",
+            Circle,
+            [[
+            new
+            ]]
+        },
+        {
+            "Image",
+            Image,
+            [[
+            new
+            ]]
+        },
+        {
+            "Polyline",
+            Polyline,
+            [[
+            new
+            ]]
+        },
+        {
+            "Square",
+            Square,
+            [[
+            new
+            ]]
+        },
+        {
+            "Text",
+            Text,
+            [[
+            new
+            ]]
+        },
+        {
+            "Triangle",
+            Triangle,
+            [[
+            new
+            ]]
+        },
+        {
+            "PointInstance",
+            PointInstance,
+            [[
+            new
+            ]]
+        },
+        {
+            "Point3D",
+            Point3D,
+            [[
+            new
+            ]]
+        },
+        {
             "Signal",
             Signal,
             [[
@@ -9274,7 +9718,7 @@ do
             "Drawing",
             Drawing,
             [[
-            new clear Clear isrenderobj getrenderproperty
+            new clear attach Clear isrenderobj getrenderproperty
             setrenderproperty
             ]]
         },
@@ -9282,16 +9726,18 @@ do
             "DrawingImmediate",
             DrawingImmediate,
             [[
-            clear Clear line text circle square quad triangle image
-            point
+            Line Circle FilledCircle Triangle FilledTriangle
+            Rectangle FilledRectangle Quad FilledQuad Polyline Text
+            OutlinedText Image GetTextBounds
             ]]
         },
         {
             "memory",
             memory,
             [[
-            changed readstring writestring readvector writevector
-            readbuffer writebuffer readi8 readu8 readi16 readu16
+            changed readbits writebits rtti readstring writestring
+            readvector writevector readbuffer writebuffer readi8 readu8
+            readi16 readu16
             readi32 readu32 readi64 readu64 readf32 readf64 writei8
             writeu8 writei16 writeu16 writei32 writeu32 writei64
             writeu64 writef32 writef64
@@ -9301,9 +9747,10 @@ do
             "crypt",
             crypt,
             [[
-            base64encode base64decode encrypt decrypt random
-            generatebytes generatekey derive custom_encrypt
-            custom_decrypt sha1 sha256 sha384 sha512 md5 blake2b
+            encrypt decrypt random random_deterministic pwhash
+            pwhash_str pwhash_str_verify generatebytes generatekey
+            derive custom_encrypt custom_decrypt sha1 sha256 sha384
+            sha512 md5 blake2b
             ]]
         },
         {
@@ -9375,8 +9822,8 @@ do
             "game",
             game,
             [[
-            GetService FindService GetObjects HttpGet HttpGetAsync
-            HttpPost HttpPostAsync IsLoaded GetJobsInfo
+            FindService GetObjects HttpGetAsync HttpPostAsync
+            IsLoaded GetJobsInfo
             GetEngineFeature SetEngineFeature GetFastFlag
             SetFastFlagForTesting
             ]]
@@ -9423,9 +9870,8 @@ do
             "UserInputService",
             user_input_service,
             [[
-            GetMouseLocation IsKeyDown IsMouseButtonPressed
-            GetKeysPressed GetMouseButtonsPressed GetConnectedGamepads
-            GetGamepadState GetNavigationGamepads
+            IsKeyDown GetConnectedGamepads GetGamepadState
+            GetNavigationGamepads
             GetSupportedGamepadKeyCodes SetNavigationGamepad
             GetDeviceAcceleration GetDeviceGravity GetDeviceRotation
             GetLastInputType GetStringForKeyCode GetImageForKeyCode
@@ -9440,31 +9886,531 @@ do
             GetMinutesAfterMidnight SetMinutesAfterMidnight
             GetMoonDirection GetSunDirection
             ]]
-        },
-        {
-            "BasePart",
-            first_basepart,
-            [[
-            AddTag RemoveTag HasTag GetTags ClearTags
-            GetAttribute GetAttributes GetAttributeChangedSignal
-            SetAttribute GetChildren GetDescendants GetFullName
-            FindFirstAncestor FindFirstAncestorOfClass
-            FindFirstAncestorWhichIsA FindFirstChild
-            FindFirstChildOfClass FindFirstChildWhichIsA
-            WaitForChild IsA IsAncestorOf IsDescendantOf Clone
-            Destroy ClearAllChildren GetPropertyChangedSignal
-            ApplyAngularImpulse ApplyImpulse ApplyImpulseAtPosition
-            CanCollideWith GetConnectedParts
-            GetJoints GetMass
-            GetNoCollisionConstraints GetRootPart GetTouchingParts
-            IsGrounded MakeJoints BreakJoints Resize
-            ]]
         }
     }
 
     for i = 1, #namespace_groups do
         local group = namespace_groups[i]
         namespace_group(group[1], group[2], group[3])
+    end
+
+    -- These bridge methods are commonly implemented through Luau's
+    -- NAMECALL opcode and can legitimately be absent from ordinary
+    -- `object.Method` indexing. Probe the real `object:Method(...)`
+    -- form so the surface score reflects what external code can call.
+    catalog_namecall_probe(
+        "UserInputService:GetMouseLocation",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+
+            return user_input_service:GetMouseLocation()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:IsMouseButtonPressed",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+
+            local mouse_button = nil
+            pcall(function()
+                mouse_button = Enum.UserInputType.MouseButton1
+            end)
+
+            return user_input_service:IsMouseButtonPressed(
+                mouse_button
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:SetMouseLocation",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+
+            local current = user_input_service:GetMouseLocation()
+            return user_input_service:SetMouseLocation(
+                current.X,
+                current.Y
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "game:GetService",
+        function()
+            if game == nil then
+                error("no DataModel fixture available", 0)
+            end
+
+            return game:GetService("Workspace")
+        end
+    )
+
+    catalog_namecall_probe(
+        "game:GetPing",
+        function()
+            if game == nil then
+                error("no DataModel fixture available", 0)
+            end
+
+            return game:GetPing()
+        end
+    )
+
+    catalog_namecall_probe(
+        "game:GetHwid",
+        function()
+            if game == nil then
+                error("no DataModel fixture available", 0)
+            end
+
+            return game:GetHwid()
+        end
+    )
+
+    catalog_namecall_probe(
+        "game:HttpGet",
+        function()
+            if game == nil then
+                error("no DataModel fixture available", 0)
+            end
+
+            return game:HttpGet(nil)
+        end,
+        true
+    )
+
+    catalog_namecall_probe(
+        "game:HttpPost",
+        function()
+            if game == nil then
+                error("no DataModel fixture available", 0)
+            end
+
+            return game:HttpPost(nil, nil)
+        end,
+        true
+    )
+
+    catalog_namecall_probe(
+        "Camera:WorldToScreenPoint",
+        function()
+            if workspace == nil then
+                error("no Workspace fixture available", 0)
+            end
+
+            local camera = workspace.CurrentCamera
+            if camera == nil then
+                error("no Camera fixture available", 0)
+            end
+
+            return camera:WorldToScreenPoint(
+                Vector3.new(0, 0, 0)
+            )
+        end
+    )
+
+    local catalog_instance_new =
+        first_present(Instance, "new", "New")
+
+    local function create_catalog_basepart()
+        if type(catalog_instance_new) ~= "function" then
+            return nil
+        end
+
+        local ok, object = pcall(catalog_instance_new, "Part")
+        if ok then
+            return object
+        end
+
+        return nil
+    end
+
+    local catalog_disposable_basepart =
+        create_catalog_basepart()
+    local catalog_peer_basepart =
+        create_catalog_basepart()
+    local catalog_basepart =
+        catalog_disposable_basepart or first_basepart
+
+    local function require_catalog_basepart()
+        if catalog_basepart == nil then
+            error("no BasePart fixture available", 0)
+        end
+
+        return catalog_basepart
+    end
+
+    local function require_disposable_basepart()
+        if catalog_disposable_basepart == nil then
+            error("no BasePart fixture available", 0)
+        end
+
+        return catalog_disposable_basepart
+    end
+
+    local catalog_tag = "__eUNC_SurfaceProbe"
+    local catalog_attribute = "__eUNC_SurfaceProbe"
+    local missing_instance_name =
+        "__eUNC_Missing_Surface_Child__"
+
+    local basepart_namecall_probes = {
+        {
+            "AddTag",
+            function()
+                local object = require_disposable_basepart()
+                object:AddTag(catalog_tag)
+            end
+        },
+        {
+            "RemoveTag",
+            function()
+                local object = require_disposable_basepart()
+                object:RemoveTag(catalog_tag)
+            end
+        },
+        {
+            "HasTag",
+            function()
+                local object = require_catalog_basepart()
+                return object:HasTag(catalog_tag)
+            end
+        },
+        {
+            "GetTags",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetTags()
+            end
+        },
+        {
+            "ClearTags",
+            function()
+                local object = require_disposable_basepart()
+                object:ClearTags()
+            end
+        },
+        {
+            "GetAttribute",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetAttribute(catalog_attribute)
+            end
+        },
+        {
+            "GetAttributes",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetAttributes()
+            end
+        },
+        {
+            "GetAttributeChangedSignal",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetAttributeChangedSignal(
+                    catalog_attribute
+                )
+            end
+        },
+        {
+            "SetAttribute",
+            function()
+                local object = require_disposable_basepart()
+                object:SetAttribute(catalog_attribute, true)
+                object:SetAttribute(catalog_attribute, nil)
+            end
+        },
+        {
+            "GetChildren",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetChildren()
+            end
+        },
+        {
+            "GetDescendants",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetDescendants()
+            end
+        },
+        {
+            "GetFullName",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetFullName()
+            end
+        },
+        {
+            "FindFirstDescendant",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstDescendant(
+                    missing_instance_name
+                )
+            end
+        },
+        {
+            "FindFirstAncestor",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstAncestor(
+                    missing_instance_name
+                )
+            end
+        },
+        {
+            "FindFirstAncestorOfClass",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstAncestorOfClass("Workspace")
+            end
+        },
+        {
+            "FindFirstAncestorWhichIsA",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstAncestorWhichIsA("Workspace")
+            end
+        },
+        {
+            "FindFirstChild",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstChild(missing_instance_name)
+            end
+        },
+        {
+            "FindFirstChildOfClass",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstChildOfClass("Folder")
+            end
+        },
+        {
+            "FindFirstChildWhichIsA",
+            function()
+                local object = require_catalog_basepart()
+                return object:FindFirstChildWhichIsA("Instance")
+            end
+        },
+        {
+            "WaitForChild",
+            function()
+                local object = require_catalog_basepart()
+                return object:WaitForChild(missing_instance_name, 0)
+            end
+        },
+        {
+            "IsA",
+            function()
+                local object = require_catalog_basepart()
+                return object:IsA("BasePart")
+            end
+        },
+        {
+            "IsAncestorOf",
+            function()
+                local object = require_catalog_basepart()
+                return object:IsAncestorOf(
+                    catalog_peer_basepart or object
+                )
+            end
+        },
+        {
+            "IsDescendantOf",
+            function()
+                local object = require_catalog_basepart()
+                return object:IsDescendantOf(workspace or object)
+            end
+        },
+        {
+            "Clone",
+            function()
+                local object = require_catalog_basepart()
+                local clone = object:Clone()
+
+                if clone ~= nil then
+                    pcall(function()
+                        clone:Destroy()
+                    end)
+                end
+
+                return clone
+            end
+        },
+        {
+            "Destroy",
+            function()
+                local object = create_catalog_basepart()
+                if object == nil then
+                    error("no BasePart fixture available", 0)
+                end
+
+                object:Destroy()
+            end
+        },
+        {
+            "ClearAllChildren",
+            function()
+                local object = require_disposable_basepart()
+                object:ClearAllChildren()
+            end
+        },
+        {
+            "GetPropertyChangedSignal",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetPropertyChangedSignal("Name")
+            end
+        },
+        {
+            "ApplyAngularImpulse",
+            function()
+                local object = require_disposable_basepart()
+                object:ApplyAngularImpulse(Vector3.new(0, 0, 0))
+            end
+        },
+        {
+            "ApplyImpulse",
+            function()
+                local object = require_disposable_basepart()
+                object:ApplyImpulse(Vector3.new(0, 0, 0))
+            end
+        },
+        {
+            "ApplyImpulseAtPosition",
+            function()
+                local object = require_disposable_basepart()
+                object:ApplyImpulseAtPosition(
+                    Vector3.new(0, 0, 0),
+                    object.Position
+                )
+            end
+        },
+        {
+            "CanCollideWith",
+            function()
+                local object = require_catalog_basepart()
+                return object:CanCollideWith(
+                    catalog_peer_basepart or object
+                )
+            end
+        },
+        {
+            "GetConnectedParts",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetConnectedParts(true)
+            end
+        },
+        {
+            "GetJoints",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetJoints()
+            end
+        },
+        {
+            "GetMass",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetMass()
+            end
+        },
+        {
+            "GetNoCollisionConstraints",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetNoCollisionConstraints()
+            end
+        },
+        {
+            "GetRootPart",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetRootPart()
+            end
+        },
+        {
+            "GetTouchingParts",
+            function()
+                local object = require_catalog_basepart()
+                return object:GetTouchingParts()
+            end
+        },
+        {
+            "IsGrounded",
+            function()
+                local object = require_catalog_basepart()
+                return object:IsGrounded()
+            end
+        },
+        {
+            "MakeJoints",
+            function()
+                local object = require_disposable_basepart()
+                object:MakeJoints()
+            end
+        },
+        {
+            "BreakJoints",
+            function()
+                local object = require_disposable_basepart()
+                object:BreakJoints()
+            end
+        },
+        {
+            "Resize",
+            function()
+                local object = require_disposable_basepart()
+                local old_size = object.Size
+                local old_cframe = object.CFrame
+                local normal_id = Enum.NormalId.Top
+                local ok, result = pcall(function()
+                    return object:Resize(normal_id, 1)
+                end)
+
+                pcall(function()
+                    object.Size = old_size
+                    object.CFrame = old_cframe
+                end)
+
+                if not ok then
+                    error(result, 0)
+                end
+
+                return result
+            end
+        }
+    }
+
+    for i = 1, #basepart_namecall_probes do
+        local probe = basepart_namecall_probes[i]
+        catalog_namecall_probe(
+            "BasePart:" .. probe[1],
+            probe[2]
+        )
+    end
+
+    if catalog_peer_basepart ~= nil then
+        pcall(function()
+            catalog_peer_basepart:Destroy()
+        end)
+    end
+
+    if catalog_disposable_basepart ~= nil then
+        pcall(function()
+            catalog_disposable_basepart:Destroy()
+        end)
     end
 
     -- Check the real Roblox remote methods without firing any live
@@ -9576,7 +10522,7 @@ do
         {
             "crypt.secretbox",
             first_present(crypt, "secretbox"),
-            "encrypt decrypt"
+            "seal open"
         },
         {
             "crypt.aead",
@@ -9602,6 +10548,16 @@ do
             "crypt.hkdf",
             first_present(crypt, "hkdf"),
             "sha256"
+        },
+        {
+            "crypt.json",
+            first_present(crypt, "json"),
+            "encode decode"
+        },
+        {
+            "crypt.hexadecimal",
+            first_present(crypt, "hexadecimal"),
+            "encode decode"
         }
     }
 
