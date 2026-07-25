@@ -16,7 +16,7 @@ local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
 local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
-local SUITE_VERSION = "v4.4"
+local SUITE_VERSION = "v4.5"
 local FAILURE_INDEX_YIELD_INTERVAL = 20
 local NATIVE_WARN = warn
 local LOADSTRING_CONFIG_OVERRIDE, LOADSTRING_VALUES_OVERRIDE = ...
@@ -61,13 +61,14 @@ local EXTERNAL_TEST_CONFIG = {
     run_memory_changed = true
 }
 
--- Change these only when enabling the matching tests.
 local EXTERNAL_TEST_VALUES = {
     http_get_url = "https://example.com/",
-    http_post_url = "https://httpbin.org/post",
+    http_post_url = nil,
     http_post_body = "{\"severe_vm_test\":true}",
     http_post_content_type = "application/json",
     http_post_accept = "application/json",
+    -- Supported values: "2arg", "3arg", or "4arg". Only one request is made.
+    http_post_signature = "4arg",
     websocket_url = "ws://127.0.0.1:8765",
     memory_read_address = nil,
     memory_write_address = nil,
@@ -92,6 +93,7 @@ local EXTERNAL_TEST_VALUE_KEYS = {
     http_post_body = true,
     http_post_content_type = true,
     http_post_accept = true,
+    http_post_signature = true,
     websocket_url = true,
     memory_read_address = true,
     memory_write_address = true,
@@ -3944,68 +3946,70 @@ if game ~= nil then
     end
 
     if EXTERNAL_TEST_CONFIG.run_http_post then
-        test("game:HttpPost returns a string", function()
-            local attempts = {
-                {
-                    name = "documented 2-argument form",
-                    callback = function()
-                        return game:HttpPost(
-                            EXTERNAL_TEST_VALUES.http_post_url,
+        local post_url = EXTERNAL_TEST_VALUES.http_post_url
+        local post_signature = EXTERNAL_TEST_VALUES.http_post_signature
+
+        if type(post_url) ~= "string" or post_url == "" then
+            record_result(
+                "game:HttpPost live behavior",
+                "SKIP",
+                "run_http_post=true, but http_post_url was not explicitly "
+                    .. "set to a known-good fixture",
+                "compatibility"
+            )
+        elseif post_signature ~= "2arg"
+            and post_signature ~= "3arg"
+            and post_signature ~= "4arg"
+        then
+            record_result(
+                "game:HttpPost live behavior",
+                "SKIP",
+                "invalid http_post_signature="
+                    .. value_to_string(post_signature)
+                    .. "; expected 2arg, 3arg, or 4arg",
+                "compatibility"
+            )
+        else
+            test(
+                "game:HttpPost "
+                    .. post_signature
+                    .. " returns a string",
+                function()
+                    local response
+
+                    if post_signature == "2arg" then
+                        response = game:HttpPost(
+                            post_url,
                             EXTERNAL_TEST_VALUES.http_post_body
                         )
-                    end
-                },
-                {
-                    name = "3-argument content-type form",
-                    callback = function()
-                        return game:HttpPost(
-                            EXTERNAL_TEST_VALUES.http_post_url,
+                    elseif post_signature == "3arg" then
+                        response = game:HttpPost(
+                            post_url,
                             EXTERNAL_TEST_VALUES.http_post_body,
                             EXTERNAL_TEST_VALUES.http_post_content_type
                         )
-                    end
-                },
-                {
-                    name = "4-argument content-type/accept form",
-                    callback = function()
-                        return game:HttpPost(
-                            EXTERNAL_TEST_VALUES.http_post_url,
+                    else
+                        response = game:HttpPost(
+                            post_url,
                             EXTERNAL_TEST_VALUES.http_post_body,
                             EXTERNAL_TEST_VALUES.http_post_content_type,
                             EXTERNAL_TEST_VALUES.http_post_accept
                         )
                     end
-                }
-            }
 
-            local errors = {}
-
-            for i = 1, #attempts do
-                local attempt = attempts[i]
-                local ok, response = pcall(attempt.callback)
-
-                if ok and type(response) == "string" then
-                    info(
-                        "game:HttpPost accepted signature",
-                        attempt.name
-                    )
-                    return true
+                    return type(response) == "string",
+                        "returned " .. type(response)
                 end
-
-                errors[#errors + 1] =
-                    attempt.name
-                    .. " => "
-                    .. value_to_string(response)
-            end
-
-            return false, table.concat(errors, " || ")
-        end)
+            )
+        end
     else
-        info(
-            "game:HttpPost active test",
-            "disabled; keep it off unless the configured endpoint is "
-                .. "already reachable, because connection failure can "
-                .. "stop the suite at Severe's hard timeout"
+        record_result(
+            "game:HttpPost live behavior",
+            "SKIP",
+            "disabled by default because no script-level timeout can stop "
+                .. "a blocked Severe native HttpPost call; enable only with "
+                .. "an explicitly configured known-good fixture",
+            "compatibility"
         )
     end
 end
@@ -5796,155 +5800,441 @@ if EXTERNAL_TEST_CONFIG.run_websocket then
             "enabled, but WebsocketClient.new is unavailable"
         )
     else
-    info(
-        "WebSocket prerequisite",
-        "local_websocket_echo_server.py must already be listening on "
-            .. EXTERNAL_TEST_VALUES.websocket_url
-    )
-
-    local websocket_new =
-        first_present(WebsocketClient, "new", "New")
-
-    local connect_ok, websocket_or_error =
-        pcall(
-            websocket_new,
-            EXTERNAL_TEST_VALUES.websocket_url
+        info(
+            "WebSocket prerequisite",
+            "local_websocket_echo_server.py must already be listening on "
+                .. EXTERNAL_TEST_VALUES.websocket_url
         )
 
-    check(
-        "WebsocketClient connects to local echo server",
-        connect_ok and websocket_or_error ~= nil,
-        websocket_or_error
-    )
+        local websocket_new =
+            first_present(WebsocketClient, "new", "New")
 
-    if connect_ok and websocket_or_error ~= nil then
-        local websocket = websocket_or_error
-        local message =
-            "Severe exhaustive WebSocket callback test"
-        local received_payload = nil
-        local received_binary = nil
-        local callback_count = 0
-
-        test("WebsocketClient.Url is readable", function()
-            return type(websocket.Url) == "string",
-                websocket.Url
-        end)
-
-        -- The GitBook currently documents DataReceived as a Signal
-        -- property using `.DataReceived:Connect(...)`. The tested Severe
-        -- build exposes a callback-registration function instead, so this
-        -- runtime-specific compatibility path remains intentionally tested.
-        test("WebsocketClient.DataReceived is a function", function()
-            return type(websocket.DataReceived) == "function",
-                type(websocket.DataReceived)
-        end)
-
-        -- Keep the native callback minimal. Console, UI, yielding, and
-        -- other Severe API calls inside it previously caused concurrent
-        -- VM/console corruption.
-        local function on_data_received(payload, is_binary)
-            callback_count = callback_count + 1
-            received_payload = payload
-            received_binary = is_binary
-        end
-
-        local register_ok, register_error = pcall(function()
-            websocket:DataReceived(on_data_received)
-        end)
+        local connect_ok, websocket_or_error =
+            pcall(
+                websocket_new,
+                EXTERNAL_TEST_VALUES.websocket_url
+            )
 
         check(
-            "websocket:DataReceived(callback) registers",
-            register_ok,
-            register_error
+            "WebsocketClient connects to local echo server",
+            connect_ok and websocket_or_error ~= nil,
+            websocket_or_error
         )
 
-        local send_ok = false
-        local send_error = nil
+        if connect_ok and websocket_or_error ~= nil then
+            local websocket = websocket_or_error
+            local received_events = {}
+            local registration_mode = nil
+            local registration_ok = false
 
-        if register_ok then
-            send_ok, send_error = pcall(function()
-                websocket:Send(message, false)
+            test("WebsocketClient.Url is readable", function()
+                return type(websocket.Url) == "string",
+                    websocket.Url
             end)
 
-            if not send_ok then
-                send_ok, send_error = pcall(function()
-                    websocket:send(message, false)
+            test("WebsocketClient.Url matches constructor URL", function()
+                return websocket.Url
+                        == EXTERNAL_TEST_VALUES.websocket_url,
+                    "expected="
+                        .. EXTERNAL_TEST_VALUES.websocket_url
+                        .. " received="
+                        .. value_to_string(websocket.Url)
+            end)
+
+            test("WebsocketClient.Url is read-only", function()
+                local original_url = websocket.Url
+                local write_ok, write_error = pcall(function()
+                    websocket.Url = original_url
+                        .. "#__severe_write_probe__"
                 end)
+                local after_url = websocket.Url
+
+                return write_ok == false or after_url == original_url,
+                    "write_ok="
+                        .. value_to_string(write_ok)
+                        .. " after="
+                        .. value_to_string(after_url)
+                        .. " error="
+                        .. value_to_string(write_error)
+            end)
+
+            -- Keep this callback deliberately minimal. Console, UI,
+            -- yielding, and other Severe API calls inside the callback
+            -- previously caused concurrent VM/console corruption.
+            local function on_data_received(payload, is_binary)
+                received_events[#received_events + 1] = {
+                    payload = payload,
+                    is_binary = is_binary
+                }
             end
-        end
 
-        check(
-            "WebsocketClient Send executes",
-            send_ok,
-            send_error
-        )
+            local data_received_ok, data_received = pcall(function()
+                return websocket.DataReceived
+            end)
 
-        if send_ok
-            and type(task) == "table"
-            and type(task.wait) == "function"
-        then
-            for i = 1, 20 do
-                if callback_count > 0 then
-                    break
+            check(
+                "WebsocketClient.DataReceived exists",
+                data_received_ok and data_received ~= nil,
+                data_received
+            )
+
+            if data_received_ok and data_received ~= nil then
+                -- The GitBook documents DataReceived as a Signal. Some
+                -- tested Severe builds expose a callback-registration
+                -- namecall instead. Prefer the documented Signal form,
+                -- then retain the known runtime compatibility form.
+                local connected, connection, connect_detail =
+                    connect_signal(data_received, on_data_received)
+
+                if connected then
+                    registration_mode =
+                        "documented Signal | " .. connect_detail
+                    registration_ok = true
+                elseif type(data_received) == "function" then
+                    local register_ok, register_error = pcall(function()
+                        websocket:DataReceived(on_data_received)
+                    end)
+
+                    if not register_ok then
+                        register_ok, register_error = pcall(function()
+                            websocket.DataReceived(
+                                websocket,
+                                on_data_received
+                            )
+                        end)
+                    end
+
+                    if register_ok then
+                        registration_mode =
+                            "runtime callback-registration namecall"
+                        registration_ok = true
+                    else
+                        registration_mode = register_error
+                    end
+                else
+                    registration_mode = connect_detail
+                end
+            end
+
+            check(
+                "WebsocketClient DataReceived callback registers",
+                registration_ok,
+                registration_mode
+            )
+
+            info(
+                "WebSocket DataReceived registration mode",
+                registration_mode
+            )
+
+            local function wait_for_event_count(target_count)
+                if type(task) ~= "table"
+                    or type(task.wait) ~= "function"
+                then
+                    return #received_events >= target_count
                 end
 
-                task.wait(0.1)
+                for i = 1, 30 do
+                    if #received_events >= target_count then
+                        return true
+                    end
+
+                    task.wait(0.1)
+                end
+
+                return #received_events >= target_count
+            end
+
+            local function send_frame(payload, is_binary, omit_flag)
+                local upper_ok, upper_error
+
+                if omit_flag then
+                    upper_ok, upper_error = pcall(function()
+                        websocket:Send(payload)
+                    end)
+                else
+                    upper_ok, upper_error = pcall(function()
+                        websocket:Send(payload, is_binary)
+                    end)
+                end
+
+                if upper_ok then
+                    return true, "Send"
+                end
+
+                local lower_ok, lower_error
+                if omit_flag then
+                    lower_ok, lower_error = pcall(function()
+                        websocket:send(payload)
+                    end)
+                else
+                    lower_ok, lower_error = pcall(function()
+                        websocket:send(payload, is_binary)
+                    end)
+                end
+
+                if lower_ok then
+                    return true, "send compatibility alias"
+                end
+
+                return false,
+                    "Send => "
+                        .. value_to_string(upper_error)
+                        .. " || send => "
+                        .. value_to_string(lower_error)
+            end
+
+            local function exercise_echo(
+                label,
+                payload,
+                is_binary,
+                omit_flag
+            )
+                local before_count = #received_events
+                local send_ok, send_detail =
+                    send_frame(payload, is_binary, omit_flag)
+
+                check(label .. " Send executes", send_ok, send_detail)
+
+                if not send_ok then
+                    return nil
+                end
+
+                local fired = wait_for_event_count(before_count + 1)
+                check(
+                    label .. " callback fires",
+                    fired,
+                    "before="
+                        .. value_to_string(before_count)
+                        .. " after="
+                        .. value_to_string(#received_events)
+                )
+
+                local event = received_events[before_count + 1]
+                if event == nil then
+                    return nil
+                end
+
+                if type(task) == "table"
+                    and type(task.wait) == "function"
+                then
+                    task.wait(0.05)
+                end
+
+                check(
+                    label .. " callback fires exactly once",
+                    #received_events == before_count + 1,
+                    "before="
+                        .. value_to_string(before_count)
+                        .. " after="
+                        .. value_to_string(#received_events)
+                )
+
+                check(
+                    label .. " payload matches",
+                    event.payload == payload,
+                    "expected="
+                        .. value_to_string(payload)
+                        .. " received="
+                        .. value_to_string(event.payload)
+                )
+
+                return event
+            end
+
+            if registration_ok then
+                if type(task) == "table"
+                    and type(task.wait) == "function"
+                then
+                    task.wait(0.05)
+                end
+
+                check(
+                    "DataReceived does not fire before a message",
+                    #received_events == 0,
+                    "callback count="
+                        .. value_to_string(#received_events)
+                )
+
+                local default_text =
+                    "Severe WebSocket default text test"
+                local default_event = exercise_echo(
+                    "Default text frame",
+                    default_text,
+                    false,
+                    true
+                )
+
+                if default_event ~= nil then
+                    check(
+                        "Default text frame isBinary is false",
+                        default_event.is_binary == false,
+                        "received="
+                            .. value_to_string(
+                                default_event.is_binary
+                            )
+                            .. " | the GitBook documents a boolean"
+                    )
+                end
+
+                local explicit_text =
+                    "Severe WebSocket explicit text test"
+                local explicit_event = exercise_echo(
+                    "Explicit text frame",
+                    explicit_text,
+                    false,
+                    false
+                )
+
+                if explicit_event ~= nil then
+                    check(
+                        "Explicit text frame isBinary is false",
+                        explicit_event.is_binary == false,
+                        "received="
+                            .. value_to_string(
+                                explicit_event.is_binary
+                            )
+                            .. " | the GitBook documents a boolean"
+                    )
+                end
+
+                local utf8_text =
+                    "Severe UTF-8: check ✓ | Привет | 你好"
+                local utf8_event = exercise_echo(
+                    "UTF-8 text frame",
+                    utf8_text,
+                    false,
+                    true
+                )
+
+                if utf8_event ~= nil then
+                    check(
+                        "UTF-8 text frame isBinary is false",
+                        utf8_event.is_binary == false,
+                        "received="
+                            .. value_to_string(utf8_event.is_binary)
+                    )
+                end
+
+                local empty_event = exercise_echo(
+                    "Empty text frame",
+                    "",
+                    false,
+                    true
+                )
+
+                if empty_event ~= nil then
+                    check(
+                        "Empty text frame isBinary is false",
+                        empty_event.is_binary == false,
+                        "received="
+                            .. value_to_string(empty_event.is_binary)
+                    )
+                end
+
+                local binary_payload = string.char(
+                    0,
+                    1,
+                    2,
+                    3,
+                    127,
+                    128,
+                    254,
+                    255
+                )
+                local binary_event = exercise_echo(
+                    "Binary frame",
+                    binary_payload,
+                    true,
+                    false
+                )
+
+                if binary_event ~= nil then
+                    check(
+                        "Binary frame isBinary is true",
+                        binary_event.is_binary == true,
+                        "received="
+                            .. value_to_string(binary_event.is_binary)
+                    )
+                end
+
+                check(
+                    "WebSocket callback order is preserved",
+                    #received_events >= 5
+                        and received_events[1].payload == default_text
+                        and received_events[2].payload == explicit_text
+                        and received_events[3].payload == utf8_text
+                        and received_events[4].payload == ""
+                        and received_events[5].payload
+                            == binary_payload,
+                    "received count="
+                        .. value_to_string(#received_events)
+                )
+
+                info(
+                    "WebSocket callback total",
+                    #received_events
+                )
+            end
+
+            local disconnect_ok, disconnect_error =
+                pcall(function()
+                    websocket:Disconnect()
+                end)
+
+            if not disconnect_ok then
+                disconnect_ok, disconnect_error =
+                    pcall(function()
+                        websocket:disconnect()
+                    end)
+            end
+
+            check(
+                "WebsocketClient Disconnect executes",
+                disconnect_ok,
+                disconnect_error
+            )
+
+            if disconnect_ok then
+                local before_post_disconnect = #received_events
+                local post_disconnect_send_ok,
+                    post_disconnect_send_error =
+                    pcall(function()
+                        websocket:Send(
+                            "__severe_post_disconnect_probe__"
+                        )
+                    end)
+
+                if type(task) == "table"
+                    and type(task.wait) == "function"
+                then
+                    task.wait(0.2)
+                end
+
+                check(
+                    "No data is received after Disconnect",
+                    #received_events == before_post_disconnect,
+                    "send_ok="
+                        .. value_to_string(post_disconnect_send_ok)
+                        .. " callback count before="
+                        .. value_to_string(before_post_disconnect)
+                        .. " after="
+                        .. value_to_string(#received_events)
+                        .. " error="
+                        .. value_to_string(
+                            post_disconnect_send_error
+                        )
+                )
             end
         end
-
-        check(
-            "DataReceived callback fires",
-            callback_count > 0,
-            "callback count=" .. value_to_string(callback_count)
-        )
-
-        check(
-            "WebSocket echo payload matches",
-            received_payload == message,
-            "expected="
-                .. message
-                .. " received="
-                .. value_to_string(received_payload)
-        )
-
-        info(
-            "WebSocket callback metadata",
-            "count="
-                .. value_to_string(callback_count)
-                .. " isBinary="
-                .. value_to_string(received_binary)
-                .. " (nil is the observed value for text frames)"
-        )
-
-        if type(task) == "table"
-            and type(task.wait) == "function"
-        then
-            task.wait(0.1)
-        end
-
-        local disconnect_ok, disconnect_error =
-            pcall(function()
-                websocket:Disconnect()
-            end)
-
-        if not disconnect_ok then
-            disconnect_ok, disconnect_error =
-                pcall(function()
-                    websocket:disconnect()
-                end)
-        end
-
-        check(
-            "WebsocketClient Disconnect executes",
-            disconnect_ok,
-            disconnect_error
-        )
-    end
     end
 else
-    info(
-        "WebSocket active test",
-        "intentionally disabled; availability remains in the surface catalog"
+    record_result(
+        "WebsocketClient live behavior",
+        "SKIP",
+        "disabled by EXTERNAL_TEST_CONFIG.run_websocket",
+        nil,
+        false
     )
 end
 
@@ -8892,16 +9182,6 @@ do
         end
     )
 
-    raw_capability_test(
-        "WebSocket",
-        "live WebSocket behavior",
-        function()
-            return CAPABILITY_SKIP,
-                "intentionally disabled; it is the only inactive live "
-                .. "test in this profile"
-        end
-    )
-
     pcall(delete_file or function() end, fs_file)
     pcall(delete_file or function() end, fs_append_file)
     pcall(delete_folder or function() end, fs_folder)
@@ -10624,9 +10904,6 @@ if #failure_records > 0 then
     print("========================================")
 end
 
-print("  RESULTS")
-print("========================================")
-
 local function score_text(stats)
     local percent = 0
     if stats.counted > 0 then
@@ -10664,30 +10941,8 @@ local overall_stats = {
     counted = pass_count + fail_count + missing_count
 }
 
-print(
-    INFO
-    .. " Functional compatibility score: "
-    .. score_text(compatibility_stats)
-)
-print(
-    INFO
-    .. " Supplemental VM-extension score: "
-    .. score_text(extension_stats)
-)
-print(
-    INFO
-    .. " Raw API surface score: "
-    .. score_text(surface_stats)
-)
-print(
-    INFO
-    .. " Overall counted outcomes: "
-    .. score_text(overall_stats)
-)
-
-print("")
 print("  CATEGORY RESULTS")
-print("----------------------------------------")
+print("========================================")
 
 local category_names = {}
 for category in pairs(category_stats) do
@@ -10721,5 +10976,30 @@ print(
     INFO
     .. " Severe-extension signatures retained as supplemental tests: "
     .. tostring(SEVERE_EXTENSION_SIGNATURE_COUNT)
+)
+
+print("")
+print("========================================")
+print("  RESULTS")
+print("========================================")
+print(
+    INFO
+    .. " Functional compatibility score: "
+    .. score_text(compatibility_stats)
+)
+print(
+    INFO
+    .. " Supplemental VM-extension score: "
+    .. score_text(extension_stats)
+)
+print(
+    INFO
+    .. " Raw API surface score: "
+    .. score_text(surface_stats)
+)
+print(
+    INFO
+    .. " Overall counted outcomes: "
+    .. score_text(overall_stats)
 )
 print("========================================")
