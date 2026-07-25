@@ -7,7 +7,6 @@ Install once:
 Run:
     py local_websocket_echo_server.py
 
-Then execute severe_websocket_local_test.lua inside Severe.
 """
 
 import asyncio
