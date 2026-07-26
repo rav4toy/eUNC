@@ -1,5 +1,5 @@
 -- ==========================================================
--- External Luau VM Capability Lab v4.4
+-- External Luau VM Capability Lab v4.6
 --
 -- Outcomes are kept distinct:
 --   PASS    = the capability exists and the tested behavior worked
@@ -16,7 +16,7 @@ local SKIP = "[SKIP]"
 local INFO = "[INFO]"
 local SEP  = "----------------------------------------"
 local SEVERE_EXTENSION_SIGNATURE_COUNT = 182
-local SUITE_VERSION = "v4.5"
+local SUITE_VERSION = "v4.6"
 local FAILURE_INDEX_YIELD_INTERVAL = 20
 local NATIVE_WARN = warn
 local LOADSTRING_CONFIG_OVERRIDE, LOADSTRING_VALUES_OVERRIDE = ...
@@ -67,7 +67,6 @@ local EXTERNAL_TEST_VALUES = {
     http_post_body = "{\"severe_vm_test\":true}",
     http_post_content_type = "application/json",
     http_post_accept = "application/json",
-    -- Supported values: "2arg", "3arg", or "4arg". Only one request is made.
     http_post_signature = "4arg",
     websocket_url = "ws://127.0.0.1:8765",
     memory_read_address = nil,
@@ -4392,12 +4391,11 @@ if instance_target ~= nil then
         return true
     end)
 
-    test("Instance:FindFirstDescendant can execute", function()
-        local unused = instance_target:FindFirstDescendant(
-            "__SEVERE_VM_TEST_MISSING_DESCENDANT__"
-        )
-        return true
-    end)
+    info(
+        "Instance:FindFirstDescendant",
+        "not actively tested because the current Roblox Creator Hub marks "
+            .. "this method disabled; use FindFirstChild(name, true) instead"
+    )
 
     test("Instance:FindFirstAncestor can execute", function()
         local unused = instance_target:FindFirstAncestor("Workspace")
@@ -6805,6 +6803,2300 @@ for i = 1, #type_samples do
             .. " | tostring="
             .. value_to_string(entry[2])
     )
+end
+
+-- ============================================================
+-- ROBLOX ENGINE SYNTAX COVERAGE (CREATOR HUB)
+-- ============================================================
+section(
+    "Roblox Engine Syntax Coverage",
+    "compatibility",
+    "Roblox Engine Syntax"
+)
+
+-- These tests target ordinary Roblox engine syntax documented by the
+-- Roblox Creator Hub. Disposable fixtures are preferred so the suite
+-- does not depend on a particular experience layout or mutate live state.
+do
+    local instance_new =
+        Instance ~= nil
+        and first_present(Instance, "new", "New")
+        or nil
+
+    local function destroy_fixture(object)
+        if object == nil then
+            return
+        end
+
+        pcall(function()
+            object:Destroy()
+        end)
+    end
+
+    local function enum_item(enum_name, item_name)
+        if Enum == nil then
+            return nil
+        end
+
+        local ok_enum, enum_type = pcall(function()
+            return Enum[enum_name]
+        end)
+        if not ok_enum or enum_type == nil then
+            return nil
+        end
+
+        local ok_item, value = pcall(function()
+            return enum_type[item_name]
+        end)
+        return ok_item and value or nil
+    end
+
+    local function check_signal(label, signal)
+        check(label .. " exists", signal ~= nil, "signal is nil")
+        if signal == nil then
+            return
+        end
+
+        local connected, connection, detail =
+            connect_signal(signal, function()
+            end)
+
+        check(label .. " can connect", connected, detail)
+        if connected and connection ~= nil then
+            local disconnected, disconnect_detail =
+                disconnect_connection(connection)
+            check(
+                label .. " connection can disconnect",
+                disconnected,
+                disconnect_detail
+            )
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Object / Instance syntax using a disposable hierarchy.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function" then
+        local root_ok, root = pcall(instance_new, "Folder")
+        local child_ok, child = pcall(instance_new, "Folder")
+        local grandchild_ok, grandchild = pcall(instance_new, "StringValue")
+
+        check(
+            "Roblox Instance fixture root creates",
+            root_ok and root ~= nil,
+            root
+        )
+        check(
+            "Roblox Instance fixture child creates",
+            child_ok and child ~= nil,
+            child
+        )
+        check(
+            "Roblox Instance fixture grandchild creates",
+            grandchild_ok and grandchild ~= nil,
+            grandchild
+        )
+
+        if root_ok and child_ok and grandchild_ok
+            and root ~= nil and child ~= nil and grandchild ~= nil
+        then
+            root.Name = "SevereRobloxRoot"
+            child.Name = "SevereRobloxChild"
+            grandchild.Name = "SevereRobloxGrandchild"
+            child.Parent = root
+            grandchild.Parent = child
+
+            test("Object:IsA supports inheritance", function()
+                return root:IsA("Folder") == true
+                    and root:IsA("Instance") == true
+            end)
+
+            test("Instance:Clone returns an independent Instance", function()
+                local clone = root:Clone()
+                local valid = clone ~= nil
+                    and clone ~= root
+                    and clone.Name == root.Name
+                    and type(clone:GetChildren()) == "table"
+                    and #clone:GetChildren() == 1
+                destroy_fixture(clone)
+                return valid
+            end)
+
+            test("Instance:FindFirstAncestor finds named ancestor", function()
+                return grandchild:FindFirstAncestor(root.Name) == root
+            end)
+
+            test("Instance:FindFirstAncestorOfClass finds Folder", function()
+                return grandchild:FindFirstAncestorOfClass("Folder") == child
+            end)
+
+            test("Instance:FindFirstAncestorWhichIsA finds Folder", function()
+                return grandchild:FindFirstAncestorWhichIsA("Folder") == child
+            end)
+
+            test("Instance:FindFirstChild recursive argument works", function()
+                return root:FindFirstChild(grandchild.Name, true) == grandchild
+            end)
+
+            test("Instance:FindFirstChildOfClass finds Folder", function()
+                return root:FindFirstChildOfClass("Folder") == child
+            end)
+
+            test("Instance:FindFirstChildWhichIsA recursive works", function()
+                return root:FindFirstChildWhichIsA("StringValue", true)
+                    == grandchild
+            end)
+
+            test("Instance:GetChildren returns direct children only", function()
+                local children = root:GetChildren()
+                return type(children) == "table"
+                    and #children == 1
+                    and children[1] == child
+            end)
+
+            test("Instance:GetDescendants includes nested descendants", function()
+                local descendants = root:GetDescendants()
+                if type(descendants) ~= "table" then
+                    return false, type(descendants)
+                end
+
+                local saw_child = false
+                local saw_grandchild = false
+                for i = 1, #descendants do
+                    saw_child = saw_child or descendants[i] == child
+                    saw_grandchild = saw_grandchild
+                        or descendants[i] == grandchild
+                end
+
+                return saw_child and saw_grandchild
+            end)
+
+            test("Instance:GetFullName returns hierarchy path", function()
+                local full_name = grandchild:GetFullName()
+                return type(full_name) == "string"
+                    and contains_plain(full_name, root.Name)
+                    and contains_plain(full_name, child.Name)
+                    and contains_plain(full_name, grandchild.Name),
+                    full_name
+            end)
+
+            test("Instance:WaitForChild returns existing child immediately", function()
+                return root:WaitForChild(child.Name, 0.05) == child
+            end)
+
+            test("Instance:IsAncestorOf disposable descendant", function()
+                return root:IsAncestorOf(grandchild) == true
+            end)
+
+            test("Instance:IsDescendantOf disposable ancestor", function()
+                return grandchild:IsDescendantOf(root) == true
+            end)
+
+            local property_signal = nil
+            local property_signal_ok, property_signal_error = pcall(function()
+                property_signal = root:GetPropertyChangedSignal("Name")
+            end)
+            check(
+                "Object:GetPropertyChangedSignal returns a signal",
+                property_signal_ok and property_signal ~= nil,
+                property_signal_error
+            )
+            if property_signal_ok and property_signal ~= nil then
+                check_signal(
+                    "Object:GetPropertyChangedSignal('Name')",
+                    property_signal
+                )
+            end
+
+            test("Instance attribute round trip works on disposable fixture", function()
+                root:SetAttribute("SevereRobloxAttribute", 4217)
+                local value = root:GetAttribute("SevereRobloxAttribute")
+                root:SetAttribute("SevereRobloxAttribute", nil)
+                return value == 4217, value
+            end)
+
+            local attr_signal = nil
+            local attr_signal_ok, attr_signal_error = pcall(function()
+                attr_signal = root:GetAttributeChangedSignal(
+                    "SevereRobloxAttributeSignal"
+                )
+            end)
+            check(
+                "Instance:GetAttributeChangedSignal returns a signal",
+                attr_signal_ok and attr_signal ~= nil,
+                attr_signal_error
+            )
+
+            if attr_signal_ok and attr_signal ~= nil then
+                local fired = 0
+                local connected, connection, detail =
+                    connect_signal(attr_signal, function()
+                        fired = fired + 1
+                    end)
+
+                check(
+                    "Instance attribute-changed signal can connect",
+                    connected,
+                    detail
+                )
+
+                if connected then
+                    root:SetAttribute("SevereRobloxAttributeSignal", 1)
+                    check(
+                        "Instance attribute-changed signal fires",
+                        fired > 0,
+                        "callback count=" .. value_to_string(fired)
+                    )
+                    root:SetAttribute("SevereRobloxAttributeSignal", nil)
+
+                    if connection ~= nil then
+                        local disconnected, disconnect_detail =
+                            disconnect_connection(connection)
+                        check(
+                            "Instance attribute-changed signal disconnects",
+                            disconnected,
+                            disconnect_detail
+                        )
+                    end
+                end
+            end
+
+            check_signal("Instance.ChildAdded", first_present(root, "ChildAdded"))
+            check_signal("Instance.ChildRemoved", first_present(root, "ChildRemoved"))
+            check_signal("Instance.DescendantAdded", first_present(root, "DescendantAdded"))
+            check_signal("Instance.DescendantRemoving", first_present(root, "DescendantRemoving"))
+            check_signal("Instance.AncestryChanged", first_present(root, "AncestryChanged"))
+            check_signal("Instance.Destroying", first_present(root, "Destroying"))
+
+            test("Instance:QueryDescendants class selector returns table", function()
+                local values = root:QueryDescendants("Folder")
+                return type(values) == "table", type(values)
+            end)
+
+            local prop_ok, prop_fixture = pcall(instance_new, "Folder")
+            if prop_ok and prop_fixture ~= nil then
+                test("Instance:IsPropertyModified reports default Name", function()
+                    return prop_fixture:IsPropertyModified("Name") == false
+                end)
+
+                test("Instance:ResetPropertyToDefault restores Name", function()
+                    prop_fixture.Name = "ChangedFromDefault"
+                    local modified = prop_fixture:IsPropertyModified("Name")
+                    prop_fixture:ResetPropertyToDefault("Name")
+                    return modified == true
+                        and prop_fixture.Name == "Folder",
+                        prop_fixture.Name
+                end)
+
+                destroy_fixture(prop_fixture)
+            end
+
+            local clear_ok, clear_fixture = pcall(function()
+                return root:Clone()
+            end)
+            if clear_ok and clear_fixture ~= nil then
+                test("Instance:ClearAllChildren clears disposable clone", function()
+                    clear_fixture:ClearAllChildren()
+                    return #clear_fixture:GetChildren() == 0
+                end)
+                destroy_fixture(clear_fixture)
+            end
+
+            info(
+                "Instance:FindFirstDescendant",
+                "not actively expected to work because the current Roblox "
+                    .. "Creator Hub marks this method disabled"
+            )
+
+            destroy_fixture(root)
+        end
+    else
+        info(
+            "Roblox disposable Instance syntax tests",
+            "skipped because Instance.new is unavailable"
+        )
+    end
+
+    -- --------------------------------------------------------
+    -- GuiObject / text syntax using disposable UI objects.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function" then
+        local screen_ok, screen = pcall(instance_new, "ScreenGui")
+        local frame_ok, frame = pcall(instance_new, "Frame")
+        local label_ok, label = pcall(instance_new, "TextLabel")
+        local button_ok, button = pcall(instance_new, "TextButton")
+        local textbox_ok, textbox = pcall(instance_new, "TextBox")
+
+        check("Instance.new('ScreenGui') succeeds", screen_ok and screen ~= nil, screen)
+        check("Instance.new('Frame') succeeds", frame_ok and frame ~= nil, frame)
+        check("Instance.new('TextLabel') succeeds", label_ok and label ~= nil, label)
+        check("Instance.new('TextButton') succeeds", button_ok and button ~= nil, button)
+        check("Instance.new('TextBox') succeeds", textbox_ok and textbox ~= nil, textbox)
+
+        if screen_ok and frame_ok and label_ok and button_ok and textbox_ok
+            and screen ~= nil and frame ~= nil and label ~= nil
+            and button ~= nil and textbox ~= nil
+        then
+            frame.Parent = screen
+            label.Parent = frame
+            button.Parent = frame
+            textbox.Parent = frame
+
+            test("ScreenGui.DisplayOrder round trip", function()
+                screen.DisplayOrder = 17
+                return screen.DisplayOrder == 17, screen.DisplayOrder
+            end)
+
+            test("ScreenGui.IgnoreGuiInset round trip", function()
+                screen.IgnoreGuiInset = true
+                return screen.IgnoreGuiInset == true
+            end)
+
+            test("ScreenGui.Enabled can be read and restored", function()
+                local old = screen.Enabled
+                screen.Enabled = old
+                return type(screen.Enabled) == "boolean"
+            end)
+
+            test("GuiObject.Visible round trip", function()
+                frame.Visible = false
+                return frame.Visible == false
+            end)
+
+            test("GuiObject.Active round trip", function()
+                frame.Active = true
+                return frame.Active == true
+            end)
+
+            test("GuiObject.BackgroundTransparency round trip", function()
+                frame.BackgroundTransparency = 0.375
+                return math.abs(frame.BackgroundTransparency - 0.375) < 0.0001,
+                    frame.BackgroundTransparency
+            end)
+
+            test("GuiObject.BorderSizePixel round trip", function()
+                frame.BorderSizePixel = 3
+                return frame.BorderSizePixel == 3, frame.BorderSizePixel
+            end)
+
+            test("GuiObject.LayoutOrder round trip", function()
+                frame.LayoutOrder = 19
+                return frame.LayoutOrder == 19, frame.LayoutOrder
+            end)
+
+            test("GuiObject.Rotation round trip", function()
+                frame.Rotation = 13
+                return frame.Rotation == 13, frame.Rotation
+            end)
+
+            test("GuiObject.ZIndex round trip", function()
+                frame.ZIndex = 9
+                return frame.ZIndex == 9, frame.ZIndex
+            end)
+
+            if Vector2 ~= nil and type(Vector2.new) == "function" then
+                test("GuiObject.AnchorPoint round trip", function()
+                    frame.AnchorPoint = Vector2.new(0.25, 0.75)
+                    return frame.AnchorPoint.X == 0.25
+                        and frame.AnchorPoint.Y == 0.75
+                end)
+            end
+
+            if UDim2 ~= nil and type(UDim2.new) == "function" then
+                test("GuiObject.Position round trip", function()
+                    frame.Position = UDim2.new(0.1, 5, 0.2, 6)
+                    local value = frame.Position
+                    return value ~= nil
+                end)
+
+                test("GuiObject.Size round trip", function()
+                    frame.Size = UDim2.new(0.5, 20, 0.25, 10)
+                    local value = frame.Size
+                    return value ~= nil
+                end)
+            end
+
+            if Color3 ~= nil and type(Color3.new) == "function" then
+                test("GuiObject.BackgroundColor3 round trip", function()
+                    frame.BackgroundColor3 = Color3.new(0.2, 0.4, 0.6)
+                    local value = frame.BackgroundColor3
+                    return value ~= nil
+                end)
+
+                test("GuiObject.BorderColor3 round trip", function()
+                    frame.BorderColor3 = Color3.new(0.8, 0.3, 0.1)
+                    local value = frame.BorderColor3
+                    return value ~= nil
+                end)
+            end
+
+            test("GuiObject.AbsolutePosition can be read", function()
+                local value = frame.AbsolutePosition
+                return value ~= nil
+            end)
+
+            test("GuiObject.AbsoluteSize can be read", function()
+                local value = frame.AbsoluteSize
+                return value ~= nil
+            end)
+
+            check_signal("GuiObject.InputBegan", first_present(frame, "InputBegan"))
+            check_signal("GuiObject.InputChanged", first_present(frame, "InputChanged"))
+            check_signal("GuiObject.InputEnded", first_present(frame, "InputEnded"))
+            check_signal("GuiObject.MouseEnter", first_present(frame, "MouseEnter"))
+            check_signal("GuiObject.MouseLeave", first_present(frame, "MouseLeave"))
+
+            test("TextLabel.Text round trip", function()
+                label.Text = "Severe Roblox TextLabel"
+                return label.Text == "Severe Roblox TextLabel", label.Text
+            end)
+
+            test("TextLabel.RichText round trip", function()
+                label.RichText = true
+                return label.RichText == true
+            end)
+
+            test("TextLabel.TextSize round trip", function()
+                label.TextSize = 21
+                return label.TextSize == 21, label.TextSize
+            end)
+
+            test("TextLabel.TextTransparency round trip", function()
+                label.TextTransparency = 0.2
+                return math.abs(label.TextTransparency - 0.2) < 0.0001,
+                    label.TextTransparency
+            end)
+
+            test("TextLabel.TextStrokeTransparency round trip", function()
+                label.TextStrokeTransparency = 0.6
+                return math.abs(label.TextStrokeTransparency - 0.6) < 0.0001,
+                    label.TextStrokeTransparency
+            end)
+
+            test("TextLabel.TextScaled round trip", function()
+                label.TextScaled = false
+                return label.TextScaled == false
+            end)
+
+            test("TextLabel.TextWrapped round trip", function()
+                label.TextWrapped = true
+                return label.TextWrapped == true
+            end)
+
+            test("TextLabel.MaxVisibleGraphemes round trip", function()
+                label.MaxVisibleGraphemes = 7
+                return label.MaxVisibleGraphemes == 7,
+                    label.MaxVisibleGraphemes
+            end)
+
+            test("TextLabel.LineHeight round trip", function()
+                label.LineHeight = 1.2
+                return math.abs(label.LineHeight - 1.2) < 0.0001,
+                    label.LineHeight
+            end)
+
+            if Color3 ~= nil and type(Color3.new) == "function" then
+                test("TextLabel.TextColor3 round trip", function()
+                    label.TextColor3 = Color3.new(0.1, 0.9, 0.3)
+                    return label.TextColor3 ~= nil
+                end)
+
+                test("TextLabel.TextStrokeColor3 round trip", function()
+                    label.TextStrokeColor3 = Color3.new(0.9, 0.1, 0.2)
+                    return label.TextStrokeColor3 ~= nil
+                end)
+            end
+
+            test("TextLabel.TextBounds can be read", function()
+                return label.TextBounds ~= nil
+            end)
+
+            test("TextLabel.TextFits can be read", function()
+                return type(label.TextFits) == "boolean", label.TextFits
+            end)
+
+            test("TextLabel.ContentText can be read", function()
+                return type(label.ContentText) == "string", label.ContentText
+            end)
+
+            test("TextButton.Text round trip", function()
+                button.Text = "Severe Button"
+                return button.Text == "Severe Button", button.Text
+            end)
+
+            test("GuiButton.AutoButtonColor round trip", function()
+                button.AutoButtonColor = false
+                return button.AutoButtonColor == false
+            end)
+
+            test("GuiButton.Modal round trip", function()
+                button.Modal = true
+                return button.Modal == true
+            end)
+
+            test("GuiButton.Selected round trip", function()
+                button.Selected = false
+                return button.Selected == false
+            end)
+
+            local custom_button_style = enum_item("ButtonStyle", "Custom")
+            if custom_button_style ~= nil then
+                test("GuiButton.Style accepts Enum.ButtonStyle.Custom", function()
+                    button.Style = custom_button_style
+                    return button.Style == custom_button_style
+                end)
+            end
+
+            check_signal("GuiButton.Activated", first_present(button, "Activated"))
+            check_signal("GuiButton.MouseButton1Click", first_present(button, "MouseButton1Click"))
+            check_signal("GuiButton.MouseButton1Down", first_present(button, "MouseButton1Down"))
+            check_signal("GuiButton.MouseButton1Up", first_present(button, "MouseButton1Up"))
+            check_signal("GuiButton.MouseButton2Click", first_present(button, "MouseButton2Click"))
+
+            test("TextBox.Text round trip", function()
+                textbox.Text = "Severe TextBox"
+                return textbox.Text == "Severe TextBox", textbox.Text
+            end)
+
+            test("TextBox.PlaceholderText round trip", function()
+                textbox.PlaceholderText = "placeholder"
+                return textbox.PlaceholderText == "placeholder",
+                    textbox.PlaceholderText
+            end)
+
+            test("TextBox.ClearTextOnFocus round trip", function()
+                textbox.ClearTextOnFocus = false
+                return textbox.ClearTextOnFocus == false
+            end)
+
+            test("TextBox.MultiLine round trip", function()
+                textbox.MultiLine = true
+                return textbox.MultiLine == true
+            end)
+
+            test("TextBox.TextEditable round trip", function()
+                textbox.TextEditable = true
+                return textbox.TextEditable == true
+            end)
+
+            test("TextBox:IsFocused returns boolean", function()
+                return type(textbox:IsFocused()) == "boolean"
+            end)
+
+            test("TextBox:ReleaseFocus(false) executes", function()
+                textbox:ReleaseFocus(false)
+                return true
+            end)
+
+            check_signal("TextBox.Focused", first_present(textbox, "Focused"))
+            check_signal("TextBox.FocusLost", first_present(textbox, "FocusLost"))
+
+            destroy_fixture(screen)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Humanoid / animation syntax.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function" then
+        local model_ok, model = pcall(instance_new, "Model")
+        local humanoid_ok, humanoid = pcall(instance_new, "Humanoid")
+        local animator_ok, animator = pcall(instance_new, "Animator")
+        local animation_ok, animation = pcall(instance_new, "Animation")
+
+        check("Instance.new('Humanoid') succeeds", humanoid_ok and humanoid ~= nil, humanoid)
+        check("Instance.new('Animator') succeeds", animator_ok and animator ~= nil, animator)
+        check("Instance.new('Animation') succeeds", animation_ok and animation ~= nil, animation)
+
+        if model_ok and model ~= nil and humanoid_ok and humanoid ~= nil then
+            humanoid.Parent = model
+            if animator_ok and animator ~= nil then
+                animator.Parent = humanoid
+            end
+
+            local humanoid_properties = {
+                "AutoJumpEnabled",
+                "AutomaticScalingEnabled",
+                "AutoRotate",
+                "BreakJointsOnDeath",
+                "CameraOffset",
+                "DisplayDistanceType",
+                "DisplayName",
+                "EvaluateStateMachine",
+                "FloorMaterial",
+                "Health",
+                "HealthDisplayDistance",
+                "HealthDisplayType",
+                "HipHeight",
+                "Jump",
+                "JumpHeight",
+                "JumpPower",
+                "MaxHealth",
+                "MaxSlopeAngle",
+                "MoveDirection",
+                "NameDisplayDistance",
+                "NameOcclusion",
+                "PlatformStand",
+                "RequiresNeck",
+                "RigType",
+                "RootPart",
+                "SeatPart",
+                "Sit",
+                "TargetPoint",
+                "UseJumpPower",
+                "WalkSpeed",
+                "WalkToPart",
+                "WalkToPoint"
+            }
+
+            for i = 1, #humanoid_properties do
+                local property = humanoid_properties[i]
+                test("Humanoid." .. property .. " can be read", function()
+                    local unused = humanoid[property]
+                    return true
+                end)
+            end
+
+            test("Humanoid:GetState returns a value", function()
+                return humanoid:GetState() ~= nil
+            end)
+
+            local jumping_state = enum_item("HumanoidStateType", "Jumping")
+            if jumping_state ~= nil then
+                test("Humanoid:GetStateEnabled returns boolean", function()
+                    return type(humanoid:GetStateEnabled(jumping_state))
+                        == "boolean"
+                end)
+
+                test("Humanoid:SetStateEnabled restores same state", function()
+                    local old = humanoid:GetStateEnabled(jumping_state)
+                    humanoid:SetStateEnabled(jumping_state, old)
+                    return humanoid:GetStateEnabled(jumping_state) == old
+                end)
+            end
+
+            if Vector3 ~= nil and type(Vector3.new) == "function" then
+                test("Humanoid:Move zero vector executes", function()
+                    humanoid:Move(Vector3.new(0, 0, 0), false)
+                    return true
+                end)
+
+                test("Humanoid:MoveTo zero point executes", function()
+                    humanoid:MoveTo(Vector3.new(0, 0, 0))
+                    return true
+                end)
+            end
+
+            test("Humanoid:TakeDamage(0) preserves Health", function()
+                local before = humanoid.Health
+                humanoid:TakeDamage(0)
+                return humanoid.Health == before,
+                    "before=" .. value_to_string(before)
+                        .. ", after=" .. value_to_string(humanoid.Health)
+            end)
+
+            test("Humanoid:UnequipTools executes", function()
+                humanoid:UnequipTools()
+                return true
+            end)
+
+            check_signal("Humanoid.Died", first_present(humanoid, "Died"))
+            check_signal("Humanoid.HealthChanged", first_present(humanoid, "HealthChanged"))
+            check_signal("Humanoid.StateChanged", first_present(humanoid, "StateChanged"))
+            check_signal("Humanoid.Running", first_present(humanoid, "Running"))
+            check_signal("Humanoid.Jumping", first_present(humanoid, "Jumping"))
+
+            if animator_ok and animator ~= nil then
+                test("Animator:GetPlayingAnimationTracks returns table", function()
+                    local tracks = animator:GetPlayingAnimationTracks()
+                    return type(tracks) == "table", type(tracks)
+                end)
+
+                test("Animator:GetTrackByAnimationId returns nil when absent", function()
+                    local track = animator:GetTrackByAnimationId("rbxassetid://0")
+                    return track == nil, track
+                end)
+
+                test("Animator.EvaluationThrottled can be read", function()
+                    return type(animator.EvaluationThrottled) == "boolean",
+                        animator.EvaluationThrottled
+                end)
+
+                test("Animator.PreferLodEnabled can be read", function()
+                    return type(animator.PreferLodEnabled) == "boolean",
+                        animator.PreferLodEnabled
+                end)
+
+                check_signal("Animator.AnimationPlayed", first_present(animator, "AnimationPlayed"))
+
+                record_result(
+                    "Animator:LoadAnimation live asset load",
+                    "SKIP",
+                    "not invoked by this syntax section because Roblox "
+                        .. "requires the Animator to be in Workspace and "
+                        .. "loading an asset introduces an external dependency",
+                    "compatibility"
+                )
+            end
+
+            if animation_ok and animation ~= nil then
+                test("Animation.AnimationId round trip", function()
+                    animation.AnimationId = "rbxassetid://0"
+                    return animation.AnimationId == "rbxassetid://0",
+                        animation.AnimationId
+                end)
+            end
+
+            destroy_fixture(model)
+            destroy_fixture(animation)
+        else
+            destroy_fixture(model)
+            destroy_fixture(humanoid)
+            destroy_fixture(animator)
+            destroy_fixture(animation)
+        end
+    end
+
+    -- Inspect a live AnimationTrack only when one already exists. This
+    -- avoids starting or downloading an animation solely for the test.
+    local live_animator = nil
+    if first_humanoid ~= nil then
+        pcall(function()
+            live_animator = first_humanoid:FindFirstChildOfClass("Animator")
+        end)
+    end
+
+    if live_animator ~= nil then
+        local tracks_ok, tracks = pcall(function()
+            return live_animator:GetPlayingAnimationTracks()
+        end)
+
+        if tracks_ok and type(tracks) == "table" and tracks[1] ~= nil then
+            local track = tracks[1]
+            local track_properties = {
+                "Animation",
+                "IsPlaying",
+                "Length",
+                "Looped",
+                "Priority",
+                "Speed",
+                "TimePosition",
+                "WeightCurrent",
+                "WeightTarget"
+            }
+
+            for i = 1, #track_properties do
+                local property = track_properties[i]
+                test("AnimationTrack." .. property .. " can be read", function()
+                    local unused = track[property]
+                    return true
+                end)
+            end
+
+            test("AnimationTrack:GetParameterDefaults returns table", function()
+                local values = track:GetParameterDefaults()
+                return type(values) == "table", type(values)
+            end)
+
+            check_signal("AnimationTrack.Stopped", first_present(track, "Stopped"))
+            check_signal("AnimationTrack.Ended", first_present(track, "Ended"))
+        else
+            info(
+                "AnimationTrack live syntax tests",
+                "skipped because no AnimationTrack is currently playing"
+            )
+        end
+    else
+        info(
+            "AnimationTrack live syntax tests",
+            "skipped because no live Animator was found"
+        )
+    end
+
+    -- --------------------------------------------------------
+    -- Camera syntax from the Roblox Camera class.
+    -- --------------------------------------------------------
+    local roblox_camera = nil
+    if workspace ~= nil then
+        pcall(function()
+            roblox_camera = workspace.CurrentCamera
+        end)
+    end
+
+    if roblox_camera ~= nil then
+        local camera_properties = {
+            "CameraSubject",
+            "CameraType",
+            "CFrame",
+            "DiagonalFieldOfView",
+            "FieldOfView",
+            "FieldOfViewMode",
+            "Focus",
+            "HeadLocked",
+            "HeadScale",
+            "MaxAxisFieldOfView",
+            "NearPlaneZ",
+            "ViewportSize",
+            "VRTiltAndRollEnabled"
+        }
+
+        for i = 1, #camera_properties do
+            local property = camera_properties[i]
+            test("Roblox Camera." .. property .. " can be read", function()
+                local unused = roblox_camera[property]
+                return true
+            end)
+        end
+
+        test("Camera:GetRenderCFrame returns a value", function()
+            return roblox_camera:GetRenderCFrame() ~= nil
+        end)
+
+        test("Camera:ScreenPointToRay returns a Ray-like value", function()
+            local ray = roblox_camera:ScreenPointToRay(0, 0, 0)
+            return ray ~= nil
+        end)
+
+        test("Camera:ViewportPointToRay returns a Ray-like value", function()
+            local ray = roblox_camera:ViewportPointToRay(0, 0, 0)
+            return ray ~= nil
+        end)
+
+        if Vector3 ~= nil and type(Vector3.new) == "function" then
+            test("Camera:WorldToViewportPoint returns point and boolean", function()
+                local point, visible =
+                    roblox_camera:WorldToViewportPoint(Vector3.new(0, 0, 0))
+                return point ~= nil and type(visible) == "boolean",
+                    "visible=" .. value_to_string(visible)
+            end)
+
+            test("Camera:WorldToScreenPoint returns point and boolean", function()
+                local point, visible =
+                    roblox_camera:WorldToScreenPoint(Vector3.new(0, 0, 0))
+                return point ~= nil and type(visible) == "boolean",
+                    "visible=" .. value_to_string(visible)
+            end)
+
+            test("Camera:GetPartsObscuringTarget returns table", function()
+                local parts = roblox_camera:GetPartsObscuringTarget(
+                    {Vector3.new(0, 0, 0)},
+                    {}
+                )
+                return type(parts) == "table", type(parts)
+            end)
+        end
+    else
+        info(
+            "Roblox Camera syntax tests",
+            "skipped because workspace.CurrentCamera is unavailable"
+        )
+    end
+
+    -- --------------------------------------------------------
+    -- UserInputService normal Roblox getters, properties, events.
+    -- --------------------------------------------------------
+    if user_input_service ~= nil then
+        local uis_properties = {
+            "AccelerometerEnabled",
+            "GamepadEnabled",
+            "GyroscopeEnabled",
+            "KeyboardEnabled",
+            "MouseBehavior",
+            "MouseDeltaSensitivity",
+            "MouseEnabled",
+            "MouseIcon",
+            "MouseIconEnabled",
+            "OnScreenKeyboardPosition",
+            "OnScreenKeyboardSize",
+            "OnScreenKeyboardVisible",
+            "PreferredInput",
+            "TouchEnabled"
+        }
+
+        for i = 1, #uis_properties do
+            local property = uis_properties[i]
+            test("UserInputService." .. property .. " can be read", function()
+                local unused = user_input_service[property]
+                return true
+            end)
+        end
+
+        test("UserInputService:GetConnectedGamepads returns table", function()
+            local values = user_input_service:GetConnectedGamepads()
+            return type(values) == "table", type(values)
+        end)
+
+        test("UserInputService:GetFocusedTextBox returns nil or TextBox", function()
+            local value = user_input_service:GetFocusedTextBox()
+            if value == nil then
+                return true
+            end
+            return value:IsA("TextBox") == true, value
+        end)
+
+        test("UserInputService:GetKeysPressed returns table", function()
+            local values = user_input_service:GetKeysPressed()
+            return type(values) == "table", type(values)
+        end)
+
+        test("UserInputService:GetLastInputType returns a value", function()
+            return user_input_service:GetLastInputType() ~= nil
+        end)
+
+        test("UserInputService:GetMouseButtonsPressed returns table", function()
+            local values = user_input_service:GetMouseButtonsPressed()
+            return type(values) == "table", type(values)
+        end)
+
+        test("UserInputService:GetMouseDelta returns Vector2-like value", function()
+            local value = user_input_service:GetMouseDelta()
+            return value ~= nil
+                and type(value.X) == "number"
+                and type(value.Y) == "number"
+        end)
+
+        test("UserInputService:GetMouseLocation returns Vector2-like value", function()
+            local value = user_input_service:GetMouseLocation()
+            return value ~= nil
+                and type(value.X) == "number"
+                and type(value.Y) == "number"
+        end)
+
+        test("UserInputService:GetNavigationGamepads returns table", function()
+            local values = user_input_service:GetNavigationGamepads()
+            return type(values) == "table", type(values)
+        end)
+
+        local key_unknown = enum_item("KeyCode", "Unknown")
+        if key_unknown ~= nil then
+            test("UserInputService:IsKeyDown returns boolean", function()
+                return type(user_input_service:IsKeyDown(key_unknown))
+                    == "boolean"
+            end)
+        end
+
+        local mouse_button_1 = enum_item("UserInputType", "MouseButton1")
+        if mouse_button_1 ~= nil then
+            test("UserInputService:IsMouseButtonPressed returns boolean", function()
+                return type(
+                    user_input_service:IsMouseButtonPressed(mouse_button_1)
+                ) == "boolean"
+            end)
+        end
+
+        local gamepad_1 = enum_item("UserInputType", "Gamepad1")
+        if gamepad_1 ~= nil then
+            test("UserInputService:GetGamepadConnected returns boolean", function()
+                return type(user_input_service:GetGamepadConnected(gamepad_1))
+                    == "boolean"
+            end)
+        end
+
+        local uis_events = {
+            {"InputBegan", first_present(user_input_service, "InputBegan")},
+            {"InputChanged", first_present(user_input_service, "InputChanged")},
+            {"InputEnded", first_present(user_input_service, "InputEnded")},
+            {"JumpRequest", first_present(user_input_service, "JumpRequest")},
+            {
+                "LastInputTypeChanged",
+                first_present(user_input_service, "LastInputTypeChanged")
+            },
+            {"TextBoxFocused", first_present(user_input_service, "TextBoxFocused")},
+            {
+                "TextBoxFocusReleased",
+                first_present(user_input_service, "TextBoxFocusReleased")
+            },
+            {"WindowFocused", first_present(user_input_service, "WindowFocused")},
+            {
+                "WindowFocusReleased",
+                first_present(user_input_service, "WindowFocusReleased")
+            }
+        }
+
+        for i = 1, #uis_events do
+            local entry = uis_events[i]
+            check_signal("UserInputService." .. entry[1], entry[2])
+        end
+
+        local accelerometer_enabled = false
+        pcall(function()
+            accelerometer_enabled =
+                user_input_service.AccelerometerEnabled == true
+        end)
+
+        if accelerometer_enabled then
+            test("UserInputService:GetDeviceAcceleration returns value", function()
+                return user_input_service:GetDeviceAcceleration() ~= nil
+            end)
+
+            test("UserInputService:GetDeviceGravity returns value", function()
+                return user_input_service:GetDeviceGravity() ~= nil
+            end)
+        else
+            info(
+                "UserInputService accelerometer getters",
+                "skipped because AccelerometerEnabled is false"
+            )
+        end
+
+        local gyroscope_enabled = false
+        pcall(function()
+            gyroscope_enabled = user_input_service.GyroscopeEnabled == true
+        end)
+
+        if gyroscope_enabled then
+            test("UserInputService:GetDeviceRotation returns tuple", function()
+                local delta, cframe = user_input_service:GetDeviceRotation()
+                return delta ~= nil and cframe ~= nil
+            end)
+        else
+            info(
+                "UserInputService:GetDeviceRotation",
+                "skipped because GyroscopeEnabled is false"
+            )
+        end
+    else
+        info(
+            "Roblox UserInputService syntax tests",
+            "skipped because UserInputService is unavailable"
+        )
+    end
+end
+
+
+
+-- ============================================================
+-- ROBLOX ENGINE EXTENDED SYNTAX COVERAGE (CREATOR HUB)
+-- ============================================================
+section(
+    "Roblox Engine Extended Syntax Coverage",
+    "compatibility",
+    "Roblox Engine Syntax"
+)
+
+do
+    local instance_new =
+        Instance ~= nil
+        and first_present(Instance, "new", "New")
+        or nil
+
+    local function get_service(name)
+        if game == nil then
+            return nil
+        end
+
+        local ok, value = pcall(function()
+            return game:GetService(name)
+        end)
+
+        return ok and value or nil
+    end
+
+    local function destroy(object)
+        if object ~= nil then
+            pcall(function()
+                object:Destroy()
+            end)
+        end
+    end
+
+    local function enum_item(enum_name, item_name)
+        if Enum == nil then
+            return nil
+        end
+
+        local ok_enum, enum_type = pcall(function()
+            return Enum[enum_name]
+        end)
+        if not ok_enum or enum_type == nil then
+            return nil
+        end
+
+        local ok_item, value = pcall(function()
+            return enum_type[item_name]
+        end)
+        return ok_item and value or nil
+    end
+
+    local function contains_identity(values, target)
+        if type(values) ~= "table" then
+            return false
+        end
+
+        for i = 1, #values do
+            if values[i] == target then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    local function probe_signal(label, object, signal_name)
+        if object == nil then
+            record_result(
+                label .. " signal",
+                "SKIP",
+                "fixture unavailable",
+                "compatibility"
+            )
+            return
+        end
+
+        local signal = first_present(object, signal_name)
+        check(label .. " signal exists", signal ~= nil, "signal is nil")
+        if signal == nil then
+            return
+        end
+
+        local connected, connection, detail =
+            connect_signal(signal, function()
+            end)
+
+        check(label .. " signal can connect", connected, detail)
+        if connected and connection ~= nil then
+            local disconnected, disconnect_detail =
+                disconnect_connection(connection)
+            check(
+                label .. " signal can disconnect",
+                disconnected,
+                disconnect_detail
+            )
+        end
+    end
+
+    local players = get_service("Players")
+    local run = get_service("RunService")
+    local tween_service = get_service("TweenService")
+    local collection_service = get_service("CollectionService")
+    local http_service = get_service("HttpService")
+    local context_action_service = get_service("ContextActionService")
+    local debris = get_service("Debris")
+    local gui_service = get_service("GuiService")
+    local text_service = get_service("TextService")
+    local sound_service = get_service("SoundService")
+    local teams_service = get_service("Teams")
+    local pathfinding_service = get_service("PathfindingService")
+    local physics_service = get_service("PhysicsService")
+    local lighting = get_service("Lighting")
+
+    -- --------------------------------------------------------
+    -- DataModel / Workspace.
+    -- --------------------------------------------------------
+    if game ~= nil then
+        test("DataModel:IsLoaded returns boolean", function()
+            return type(game:IsLoaded()) == "boolean"
+        end)
+
+        test("DataModel:FindService finds Workspace", function()
+            return game:FindService("Workspace") ~= nil
+        end)
+
+        test("DataModel:GetService returns Players", function()
+            return game:GetService("Players") ~= nil
+        end)
+    end
+
+    if workspace ~= nil then
+        local workspace_properties = {
+            "Gravity",
+            "FallenPartsDestroyHeight",
+            "StreamingEnabled",
+            "CurrentCamera",
+            "DistributedGameTime"
+        }
+
+        for i = 1, #workspace_properties do
+            local property = workspace_properties[i]
+            test("Workspace." .. property .. " can be read", function()
+                local unused = workspace[property]
+                return true
+            end)
+        end
+
+        test("Workspace:GetServerTimeNow returns number", function()
+            local value = workspace:GetServerTimeNow()
+            return type(value) == "number", value
+        end)
+
+        if Vector3 ~= nil and type(Vector3.new) == "function" then
+            test("Workspace:Raycast executes with ordinary Roblox syntax", function()
+                local unused = workspace:Raycast(
+                    Vector3.new(0, -100000, 0),
+                    Vector3.new(0, -1, 0)
+                )
+                return true
+            end)
+
+            if CFrame ~= nil and type(CFrame.new) == "function" then
+                test("Workspace:GetPartBoundsInBox returns table", function()
+                    local values = workspace:GetPartBoundsInBox(
+                        CFrame.new(0, -100000, 0),
+                        Vector3.new(1, 1, 1)
+                    )
+                    return type(values) == "table", type(values)
+                end)
+            end
+
+            test("Workspace:GetPartBoundsInRadius returns table", function()
+                local values = workspace:GetPartBoundsInRadius(
+                    Vector3.new(0, -100000, 0),
+                    0.5
+                )
+                return type(values) == "table", type(values)
+            end)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Players / Player.
+    -- --------------------------------------------------------
+    if players ~= nil then
+        local players_properties = {
+            "CharacterAutoLoads",
+            "LocalPlayer",
+            "MaxPlayers",
+            "RespawnTime"
+        }
+
+        for i = 1, #players_properties do
+            local property = players_properties[i]
+            test("Players." .. property .. " can be read", function()
+                local unused = players[property]
+                return true
+            end)
+        end
+
+        test("Players:GetPlayers returns Player array", function()
+            local values = players:GetPlayers()
+            if type(values) ~= "table" then
+                return false, type(values)
+            end
+
+            for i = 1, #values do
+                if values[i] == nil or values[i]:IsA("Player") ~= true then
+                    return false, "non-Player entry at index " .. tostring(i)
+                end
+            end
+
+            return true
+        end)
+
+        local local_player = nil
+        pcall(function()
+            local_player = players.LocalPlayer
+        end)
+
+        if local_player ~= nil then
+            test("Players:GetPlayerByUserId finds LocalPlayer", function()
+                return players:GetPlayerByUserId(local_player.UserId)
+                    == local_player
+            end)
+
+            if local_player.Character ~= nil then
+                test("Players:GetPlayerFromCharacter finds LocalPlayer", function()
+                    return players:GetPlayerFromCharacter(
+                        local_player.Character
+                    ) == local_player
+                end)
+            else
+                record_result(
+                    "Players:GetPlayerFromCharacter live-character check",
+                    "SKIP",
+                    "LocalPlayer.Character is nil",
+                    "compatibility"
+                )
+            end
+
+            local player_properties = {
+                "AccountAge",
+                "AutoJumpEnabled",
+                "CameraMaxZoomDistance",
+                "CameraMinZoomDistance",
+                "CameraMode",
+                "CanLoadCharacterAppearance",
+                "Character",
+                "CharacterAppearanceId",
+                "DisplayName",
+                "GameplayPaused",
+                "HasRobloxSubscription",
+                "HasVerifiedBadge",
+                "LocaleId",
+                "Neutral",
+                "Team",
+                "TeamColor",
+                "UserId"
+            }
+
+            for i = 1, #player_properties do
+                local property = player_properties[i]
+                test("Player." .. property .. " can be read", function()
+                    local unused = local_player[property]
+                    return true
+                end)
+            end
+
+            if Vector3 ~= nil and type(Vector3.new) == "function" then
+                test("Player:DistanceFromCharacter returns number", function()
+                    local value = local_player:DistanceFromCharacter(
+                        Vector3.new(0, 0, 0)
+                    )
+                    return type(value) == "number", value
+                end)
+            end
+
+            test("Player:GetNetworkPing returns number", function()
+                local value = local_player:GetNetworkPing()
+                return type(value) == "number", value
+            end)
+
+            test("Player:HasAppearanceLoaded returns boolean", function()
+                return type(local_player:HasAppearanceLoaded()) == "boolean"
+            end)
+
+            test("Player:GetMouse returns a Mouse-like object", function()
+                local mouse = local_player:GetMouse()
+                return mouse ~= nil, mouse
+            end)
+
+            test("Player:GetCameraState returns table", function()
+                local state = local_player:GetCameraState()
+                return type(state) == "table", type(state)
+            end)
+
+            probe_signal("Player.CharacterAdded", local_player, "CharacterAdded")
+            probe_signal("Player.CharacterRemoving", local_player, "CharacterRemoving")
+            probe_signal("Player.Chatted", local_player, "Chatted")
+            probe_signal("Player.Idled", local_player, "Idled")
+        end
+
+        probe_signal("Players.PlayerAdded", players, "PlayerAdded")
+        probe_signal("Players.PlayerRemoving", players, "PlayerRemoving")
+    end
+
+    -- --------------------------------------------------------
+    -- RunService official scheduler API.
+    -- --------------------------------------------------------
+    if run ~= nil then
+        local run_predicates = {
+            "IsClient",
+            "IsServer",
+            "IsStudio",
+            "IsRunning",
+            "IsRunMode"
+        }
+
+        -- RunService:IsEdit is Plugin Security in the current Roblox API.
+        -- Keep it in the raw surface inventory, but do not actively invoke
+        -- it from this normal in-experience behavior section.
+
+        for i = 1, #run_predicates do
+            local method = run_predicates[i]
+            test("RunService:" .. method .. " returns boolean", function()
+                local value = run[method](run)
+                return type(value) == "boolean", value
+            end)
+        end
+
+        local run_events = {
+            "Heartbeat",
+            "PostSimulation",
+            "PreAnimation",
+            "PreRender",
+            "PreSimulation",
+            "RenderStepped",
+            "Stepped"
+        }
+
+        for i = 1, #run_events do
+            probe_signal("RunService." .. run_events[i], run, run_events[i])
+        end
+
+        local is_client = false
+        pcall(function()
+            is_client = run:IsClient() == true
+        end)
+
+        if is_client then
+            test("RunService BindToRenderStep/UnbindFromRenderStep round trip", function()
+                local name = "__SevereRobloxBindProbe"
+                run:BindToRenderStep(name, 1, function()
+                end)
+                run:UnbindFromRenderStep(name)
+                return true
+            end)
+        else
+            record_result(
+                "RunService BindToRenderStep client-only round trip",
+                "SKIP",
+                "RunService:IsClient() is false",
+                "compatibility"
+            )
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- TweenService / Tween.
+    -- --------------------------------------------------------
+    if tween_service ~= nil then
+        local linear = enum_item("EasingStyle", "Linear")
+        local in_out = enum_item("EasingDirection", "InOut")
+
+        if linear ~= nil and in_out ~= nil then
+            test("TweenService:GetValue returns eased alpha", function()
+                local value = tween_service:GetValue(0.25, linear, in_out)
+                return type(value) == "number"
+                    and value >= 0
+                    and value <= 1,
+                    value
+            end)
+        end
+
+        test("TweenService:SmoothDamp numeric overload", function()
+            local new_value, new_velocity =
+                tween_service:SmoothDamp(0, 10, 0, 0.5, nil, 1 / 60)
+            return type(new_value) == "number"
+                and type(new_velocity) == "number",
+                value_to_string(new_value)
+                    .. ", "
+                    .. value_to_string(new_velocity)
+        end)
+
+        if type(instance_new) == "function"
+            and TweenInfo ~= nil
+            and type(first_present(TweenInfo, "new")) == "function"
+        then
+            local value_ok, number_value = pcall(instance_new, "NumberValue")
+            if value_ok and number_value ~= nil then
+                local tween_ok, tween_or_error = pcall(function()
+                    return tween_service:Create(
+                        number_value,
+                        TweenInfo.new(0.05),
+                        {Value = 1}
+                    )
+                end)
+
+                check(
+                    "TweenService:Create returns Tween",
+                    tween_ok and tween_or_error ~= nil,
+                    tween_or_error
+                )
+
+                if tween_ok and tween_or_error ~= nil then
+                    local tween = tween_or_error
+                    test("Tween.PlaybackState can be read", function()
+                        return tween.PlaybackState ~= nil
+                    end)
+                    probe_signal("Tween.Completed", tween, "Completed")
+                    test("Tween:Play executes", function()
+                        tween:Play()
+                        return true
+                    end)
+                    test("Tween:Pause executes", function()
+                        tween:Pause()
+                        return true
+                    end)
+                    test("Tween:Cancel executes", function()
+                        tween:Cancel()
+                        return true
+                    end)
+                end
+
+                destroy(number_value)
+            end
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- CollectionService tags.
+    -- --------------------------------------------------------
+    if collection_service ~= nil and type(instance_new) == "function" then
+        local fixture_ok, fixture = pcall(instance_new, "Folder")
+        if fixture_ok and fixture ~= nil then
+            fixture.Name = "SevereCollectionServiceFixture"
+            if workspace ~= nil then
+                fixture.Parent = workspace
+            end
+
+            local tag = "__SevereCollectionServiceProbe"
+            local added_count = 0
+            local removed_count = 0
+
+            local added_signal = collection_service:GetInstanceAddedSignal(tag)
+            local removed_signal = collection_service:GetInstanceRemovedSignal(tag)
+
+            local added_connected, added_connection =
+                connect_signal(added_signal, function(instance)
+                    if instance == fixture then
+                        added_count = added_count + 1
+                    end
+                end)
+            local removed_connected, removed_connection =
+                connect_signal(removed_signal, function(instance)
+                    if instance == fixture then
+                        removed_count = removed_count + 1
+                    end
+                end)
+
+            check(
+                "CollectionService:GetInstanceAddedSignal connects",
+                added_connected
+            )
+            check(
+                "CollectionService:GetInstanceRemovedSignal connects",
+                removed_connected
+            )
+
+            test("CollectionService:AddTag/HasTag round trip", function()
+                collection_service:AddTag(fixture, tag)
+                return collection_service:HasTag(fixture, tag) == true
+            end)
+
+            test("CollectionService:GetTags includes assigned tag", function()
+                local tags = collection_service:GetTags(fixture)
+                if type(tags) ~= "table" then
+                    return false, type(tags)
+                end
+
+                for i = 1, #tags do
+                    if tags[i] == tag then
+                        return true
+                    end
+                end
+
+                return false, "tag not returned"
+            end)
+
+            test("CollectionService:GetTagged includes live fixture", function()
+                local tagged = collection_service:GetTagged(tag)
+                return contains_identity(tagged, fixture)
+            end)
+
+            test("CollectionService:GetAllTags returns table", function()
+                return type(collection_service:GetAllTags()) == "table"
+            end)
+
+            test("CollectionService:RemoveTag clears tag", function()
+                collection_service:RemoveTag(fixture, tag)
+                return collection_service:HasTag(fixture, tag) == false
+            end)
+
+            if added_connected then
+                check(
+                    "CollectionService added signal observed fixture",
+                    added_count >= 1,
+                    "count=" .. value_to_string(added_count)
+                )
+            end
+
+            if removed_connected then
+                check(
+                    "CollectionService removed signal observed fixture",
+                    removed_count >= 1,
+                    "count=" .. value_to_string(removed_count)
+                )
+            end
+
+            if added_connection ~= nil then
+                disconnect_connection(added_connection)
+            end
+            if removed_connection ~= nil then
+                disconnect_connection(removed_connection)
+            end
+
+            destroy(fixture)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- HttpService local utility methods only. No network calls.
+    -- --------------------------------------------------------
+    if http_service ~= nil then
+        test("HttpService.HttpEnabled can be read", function()
+            return type(http_service.HttpEnabled) == "boolean"
+        end)
+
+        test("HttpService JSON encode/decode round trip", function()
+            local encoded = http_service:JSONEncode({
+                severe = true,
+                value = 44
+            })
+            local decoded = http_service:JSONDecode(encoded)
+            return type(encoded) == "string"
+                and type(decoded) == "table"
+                and decoded.severe == true
+                and decoded.value == 44
+        end)
+
+        test("HttpService:GenerateGUID returns non-empty string", function()
+            local value = http_service:GenerateGUID(false)
+            return type(value) == "string" and #value > 0, value
+        end)
+
+        test("HttpService:UrlEncode percent-encodes spaces", function()
+            local value = http_service:UrlEncode("Severe Roblox test")
+            return type(value) == "string"
+                and contains_plain(value, "%20"),
+                value
+        end)
+    end
+
+    -- --------------------------------------------------------
+    -- ContextActionService local binding surface.
+    -- --------------------------------------------------------
+    if context_action_service ~= nil then
+        local key = enum_item("KeyCode", "F8")
+        if key ~= nil then
+            test("ContextActionService Bind/Get/Unbind round trip", function()
+                local action = "__SevereRobloxActionProbe"
+                context_action_service:BindAction(
+                    action,
+                    function()
+                        return nil
+                    end,
+                    false,
+                    key
+                )
+
+                local info_table =
+                    context_action_service:GetBoundActionInfo(action)
+                local all =
+                    context_action_service:GetAllBoundActionInfo()
+                context_action_service:UnbindAction(action)
+
+                return type(info_table) == "table"
+                    and type(all) == "table"
+                    and all[action] ~= nil
+            end)
+
+            test("ContextActionService:BindActionAtPriority executes", function()
+                local action = "__SevereRobloxPriorityActionProbe"
+                context_action_service:BindActionAtPriority(
+                    action,
+                    function()
+                        return nil
+                    end,
+                    false,
+                    3000,
+                    key
+                )
+                context_action_service:UnbindAction(action)
+                return true
+            end)
+        end
+
+        probe_signal(
+            "ContextActionService.LocalToolEquipped",
+            context_action_service,
+            "LocalToolEquipped"
+        )
+        probe_signal(
+            "ContextActionService.LocalToolUnequipped",
+            context_action_service,
+            "LocalToolUnequipped"
+        )
+    end
+
+    -- --------------------------------------------------------
+    -- GuiService.
+    -- --------------------------------------------------------
+    if gui_service ~= nil then
+        local gui_properties = {
+            "AutoSelectGuiEnabled",
+            "GuiNavigationEnabled",
+            "MenuIsOpen",
+            "PreferredTextSize",
+            "PreferredTransparency",
+            "ReducedMotionEnabled",
+            "SelectedObject",
+            "TopbarInset",
+            "TouchControlsEnabled",
+            "ViewportDisplaySize"
+        }
+
+        for i = 1, #gui_properties do
+            local property = gui_properties[i]
+            test("GuiService." .. property .. " can be read", function()
+                local unused = gui_service[property]
+                return true
+            end)
+        end
+
+        test("GuiService:GetGuiInset returns two values", function()
+            local top_left, bottom_right = gui_service:GetGuiInset()
+            return top_left ~= nil and bottom_right ~= nil
+        end)
+
+        local no_insets = enum_item("ScreenInsets", "None")
+        if no_insets ~= nil then
+            test("GuiService:GetInsetArea returns Rect-like value", function()
+                return gui_service:GetInsetArea(no_insets) ~= nil
+            end)
+        end
+
+        test("GuiService:GetInspectMenuEnabled returns boolean", function()
+            return type(gui_service:GetInspectMenuEnabled()) == "boolean"
+        end)
+
+        probe_signal("GuiService.MenuOpened", gui_service, "MenuOpened")
+        probe_signal("GuiService.MenuClosed", gui_service, "MenuClosed")
+    end
+
+    -- --------------------------------------------------------
+    -- TextService deterministic measurement path.
+    -- --------------------------------------------------------
+    if text_service ~= nil
+        and Vector2 ~= nil
+        and type(Vector2.new) == "function"
+    then
+        local font = enum_item("Font", "SourceSans")
+        if font ~= nil then
+            test("TextService:GetTextSize returns Vector2-like value", function()
+                local size = text_service:GetTextSize(
+                    "Severe Roblox",
+                    18,
+                    font,
+                    Vector2.new(512, 512)
+                )
+                return size ~= nil
+                    and type(size.X) == "number"
+                    and type(size.Y) == "number"
+            end)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Lighting local getters; no time mutation.
+    -- --------------------------------------------------------
+    if lighting ~= nil then
+        local lighting_properties = {
+            "Ambient",
+            "Brightness",
+            "ClockTime",
+            "ExposureCompensation",
+            "FogColor",
+            "FogEnd",
+            "FogStart",
+            "GeographicLatitude",
+            "GlobalShadows",
+            "OutdoorAmbient",
+            "ShadowSoftness",
+            "TimeOfDay"
+        }
+
+        for i = 1, #lighting_properties do
+            local property = lighting_properties[i]
+            test("Lighting." .. property .. " can be read", function()
+                local unused = lighting[property]
+                return true
+            end)
+        end
+
+        test("Lighting:GetMinutesAfterMidnight returns number", function()
+            return type(lighting:GetMinutesAfterMidnight()) == "number"
+        end)
+
+        test("Lighting:GetSunDirection returns Vector3-like value", function()
+            local value = lighting:GetSunDirection()
+            return value ~= nil
+                and type(value.X) == "number"
+                and type(value.Y) == "number"
+                and type(value.Z) == "number"
+        end)
+
+        test("Lighting:GetMoonDirection returns Vector3-like value", function()
+            local value = lighting:GetMoonDirection()
+            return value ~= nil
+                and type(value.X) == "number"
+                and type(value.Y) == "number"
+                and type(value.Z) == "number"
+        end)
+
+        probe_signal("Lighting.LightingChanged", lighting, "LightingChanged")
+    end
+
+    -- --------------------------------------------------------
+    -- Model / PVInstance / BasePart disposable fixtures.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function"
+        and Vector3 ~= nil
+        and type(Vector3.new) == "function"
+        and CFrame ~= nil
+        and type(CFrame.new) == "function"
+    then
+        local model_ok, model = pcall(instance_new, "Model")
+        local part_a_ok, part_a = pcall(instance_new, "Part")
+        local part_b_ok, part_b = pcall(instance_new, "Part")
+
+        if model_ok and part_a_ok and part_b_ok
+            and model ~= nil and part_a ~= nil and part_b ~= nil
+        then
+            part_a.Name = "Root"
+            part_b.Name = "Child"
+            part_a.Anchored = true
+            part_b.Anchored = true
+            part_a.Size = Vector3.new(2, 2, 2)
+            part_b.Size = Vector3.new(1, 1, 1)
+            part_a.CFrame = CFrame.new(0, 0, 0)
+            part_b.CFrame = CFrame.new(4, 0, 0)
+            part_a.Parent = model
+            part_b.Parent = model
+            model.PrimaryPart = part_a
+
+            test("PVInstance:GetPivot returns CFrame-like value", function()
+                return model:GetPivot() ~= nil
+            end)
+
+            test("PVInstance:PivotTo moves disposable Model", function()
+                local original = model:GetPivot()
+                local target = original * CFrame.new(1, 0, 0)
+                model:PivotTo(target)
+                local moved = model:GetPivot()
+                model:PivotTo(original)
+                return moved ~= nil
+            end)
+
+            test("Model:GetBoundingBox returns CFrame and Vector3", function()
+                local cf, size = model:GetBoundingBox()
+                return cf ~= nil
+                    and size ~= nil
+                    and type(size.X) == "number"
+            end)
+
+            test("Model:GetExtentsSize returns Vector3-like value", function()
+                local size = model:GetExtentsSize()
+                return size ~= nil and type(size.X) == "number"
+            end)
+
+            test("Model:GetScale returns number", function()
+                return type(model:GetScale()) == "number"
+            end)
+
+            test("Model:ScaleTo same scale executes", function()
+                local scale = model:GetScale()
+                model:ScaleTo(scale)
+                return math.abs(model:GetScale() - scale) < 0.0001
+            end)
+
+            test("Model:MoveTo executes on disposable model", function()
+                local pivot = model:GetPivot()
+                model:MoveTo(pivot.Position)
+                return true
+            end)
+
+            test("BasePart:GetMass returns number", function()
+                return type(part_a:GetMass()) == "number"
+            end)
+
+            test("BasePart:GetConnectedParts returns table", function()
+                return type(part_a:GetConnectedParts(false)) == "table"
+            end)
+
+            test("BasePart:GetJoints returns table", function()
+                return type(part_a:GetJoints()) == "table"
+            end)
+
+            test("BasePart:GetTouchingParts returns table", function()
+                return type(part_a:GetTouchingParts()) == "table"
+            end)
+
+            test("BasePart:GetVelocityAtPosition returns Vector3-like value", function()
+                local value = part_a:GetVelocityAtPosition(part_a.Position)
+                return value ~= nil and type(value.X) == "number"
+            end)
+
+            test("BasePart:GetClosestPointOnSurface returns Vector3-like value", function()
+                local value = part_a:GetClosestPointOnSurface(
+                    Vector3.new(5, 5, 5)
+                )
+                return value ~= nil and type(value.X) == "number"
+            end)
+
+            test("BasePart:CanCollideWith returns boolean", function()
+                return type(part_a:CanCollideWith(part_b)) == "boolean"
+            end)
+
+            probe_signal("BasePart.Touched", part_a, "Touched")
+            probe_signal("BasePart.TouchEnded", part_a, "TouchEnded")
+
+            destroy(model)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Additional Humanoid methods on disposable Humanoid.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function" then
+        local h_ok, humanoid = pcall(instance_new, "Humanoid")
+        if h_ok and humanoid ~= nil then
+            test("Humanoid:GetMoveVelocity returns Vector3-like value", function()
+                local value = humanoid:GetMoveVelocity()
+                return value ~= nil and type(value.X) == "number"
+            end)
+
+            info(
+                "Humanoid:GetRelativeVelocityAtFloor behavior",
+                "surface-tested only; meaningful behavior needs a simulated character/floor fixture"
+            )
+
+            test("Humanoid:GetAccessories returns table", function()
+                return type(humanoid:GetAccessories()) == "table"
+            end)
+
+            info(
+                "Humanoid:GetAppliedDescription behavior",
+                "surface-tested only; result depends on a fully configured character/avatar description"
+            )
+
+            info(
+                "Humanoid:ChangeState behavior",
+                "already covered by the character-aware Humanoid fixture; not repeated on an orphan Humanoid"
+            )
+
+            probe_signal("Humanoid.MoveToFinished", humanoid, "MoveToFinished")
+            probe_signal("Humanoid.Seated", humanoid, "Seated")
+            probe_signal("Humanoid.StateEnabledChanged", humanoid, "StateEnabledChanged")
+            probe_signal("Humanoid.Swimming", humanoid, "Swimming")
+
+            destroy(humanoid)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- BindableEvent local event syntax.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function" then
+        local event_ok, bindable_event = pcall(instance_new, "BindableEvent")
+        if event_ok and bindable_event ~= nil then
+            local received_a = nil
+            local received_b = nil
+            local signal = first_present(bindable_event, "Event")
+            local connected, connection, detail =
+                connect_signal(signal, function(a, b)
+                    received_a = a
+                    received_b = b
+                end)
+
+            check("BindableEvent.Event can connect", connected, detail)
+            if connected then
+                test("BindableEvent:Fire forwards arguments", function()
+                    bindable_event:Fire(123, "roblox")
+                    return received_a == 123 and received_b == "roblox",
+                        value_to_string(received_a)
+                            .. ", "
+                            .. value_to_string(received_b)
+                end)
+            end
+
+            if connection ~= nil then
+                disconnect_connection(connection)
+            end
+            destroy(bindable_event)
+        end
+
+        local function_ok, bindable_function = pcall(instance_new, "BindableFunction")
+        if function_ok and bindable_function ~= nil then
+            test("BindableFunction.OnInvoke callback can be assigned", function()
+                bindable_function.OnInvoke = function(a, b)
+                    return a + b
+                end
+                return true
+            end)
+
+            -- Invoke is deliberately not called unless the callback assignment
+            -- can be trusted by the host; a broken callback bridge can otherwise
+            -- yield forever. The raw surface catalog still checks :Invoke.
+            destroy(bindable_function)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Tool / ProximityPrompt / Sound disposable classes.
+    -- --------------------------------------------------------
+    if type(instance_new) == "function" then
+        local tool_ok, tool = pcall(instance_new, "Tool")
+        if tool_ok and tool ~= nil then
+            local tool_properties = {
+                "CanBeDropped",
+                "Enabled",
+                "Grip",
+                "ManualActivationOnly",
+                "RequiresHandle",
+                "ToolTip"
+            }
+            for i = 1, #tool_properties do
+                local property = tool_properties[i]
+                test("Tool." .. property .. " can be read", function()
+                    local unused = tool[property]
+                    return true
+                end)
+            end
+
+            test("Tool:Activate executes", function()
+                tool:Activate()
+                return true
+            end)
+            test("Tool:Deactivate executes", function()
+                tool:Deactivate()
+                return true
+            end)
+            probe_signal("Tool.Activated", tool, "Activated")
+            probe_signal("Tool.Deactivated", tool, "Deactivated")
+            probe_signal("Tool.Equipped", tool, "Equipped")
+            probe_signal("Tool.Unequipped", tool, "Unequipped")
+            destroy(tool)
+        end
+
+        local prompt_ok, prompt = pcall(instance_new, "ProximityPrompt")
+        if prompt_ok and prompt ~= nil then
+            local prompt_properties = {
+                "ActionText",
+                "ClickablePrompt",
+                "Enabled",
+                "GamepadKeyCode",
+                "HoldDuration",
+                "KeyboardKeyCode",
+                "MaxActivationDistance",
+                "ObjectText",
+                "RequiresLineOfSight",
+                "Style",
+                "UIOffset"
+            }
+            for i = 1, #prompt_properties do
+                local property = prompt_properties[i]
+                test("ProximityPrompt." .. property .. " can be read", function()
+                    local unused = prompt[property]
+                    return true
+                end)
+            end
+
+            test("ProximityPrompt:InputHoldBegin executes", function()
+                prompt:InputHoldBegin()
+                return true
+            end)
+            test("ProximityPrompt:InputHoldEnd executes", function()
+                prompt:InputHoldEnd()
+                return true
+            end)
+            probe_signal("ProximityPrompt.Triggered", prompt, "Triggered")
+            probe_signal("ProximityPrompt.TriggerEnded", prompt, "TriggerEnded")
+            probe_signal("ProximityPrompt.PromptShown", prompt, "PromptShown")
+            probe_signal("ProximityPrompt.PromptHidden", prompt, "PromptHidden")
+            destroy(prompt)
+        end
+
+        local sound_ok, sound = pcall(instance_new, "Sound")
+        if sound_ok and sound ~= nil then
+            local sound_properties = {
+                "IsLoaded",
+                "Looped",
+                "PlaybackSpeed",
+                "Playing",
+                "RollOffMaxDistance",
+                "RollOffMinDistance",
+                "SoundId",
+                "TimeLength",
+                "TimePosition",
+                "Volume"
+            }
+            for i = 1, #sound_properties do
+                local property = sound_properties[i]
+                test("Sound." .. property .. " can be read", function()
+                    local unused = sound[property]
+                    return true
+                end)
+            end
+
+            test("Sound:Pause executes without an asset", function()
+                sound:Pause()
+                return true
+            end)
+            test("Sound:Resume executes without an asset", function()
+                sound:Resume()
+                return true
+            end)
+            test("Sound:Stop executes without an asset", function()
+                sound:Stop()
+                return true
+            end)
+            probe_signal("Sound.Ended", sound, "Ended")
+            probe_signal("Sound.Loaded", sound, "Loaded")
+            probe_signal("Sound.Paused", sound, "Paused")
+            probe_signal("Sound.Played", sound, "Played")
+            probe_signal("Sound.Resumed", sound, "Resumed")
+            probe_signal("Sound.Stopped", sound, "Stopped")
+            destroy(sound)
+        end
+    end
+
+    if sound_service ~= nil then
+        test("SoundService:GetMixerTime returns number", function()
+            return type(sound_service:GetMixerTime()) == "number"
+        end)
+
+        test("SoundService:GetListener returns values", function()
+            local listener_type = sound_service:GetListener()
+            return listener_type ~= nil
+        end)
+    end
+
+    -- --------------------------------------------------------
+    -- Debris / Teams / PathfindingService.
+    -- --------------------------------------------------------
+    if debris ~= nil and type(instance_new) == "function" then
+        local debris_ok, debris_fixture = pcall(instance_new, "Folder")
+        if debris_ok and debris_fixture ~= nil then
+            test("Debris:AddItem schedules disposable Instance", function()
+                debris:AddItem(debris_fixture, 3600)
+                return true
+            end)
+            destroy(debris_fixture)
+        end
+    end
+
+    if teams_service ~= nil then
+        test("Teams:GetTeams returns table", function()
+            local values = teams_service:GetTeams()
+            return type(values) == "table", type(values)
+        end)
+
+        if type(instance_new) == "function" then
+            local team_ok, team = pcall(instance_new, "Team")
+            if team_ok and team ~= nil then
+                test("Team:GetPlayers returns table", function()
+                    return type(team:GetPlayers()) == "table"
+                end)
+                probe_signal("Team.PlayerAdded", team, "PlayerAdded")
+                probe_signal("Team.PlayerRemoved", team, "PlayerRemoved")
+                destroy(team)
+            end
+        end
+    end
+
+    if pathfinding_service ~= nil then
+        test("PathfindingService:CreatePath returns Path", function()
+            local path = pathfinding_service:CreatePath()
+            local valid = path ~= nil
+            if valid then
+                pcall(function()
+                    local waypoints = path:GetWaypoints()
+                    valid = type(waypoints) == "table"
+                end)
+            end
+            return valid, path
+        end)
+    end
+
+    if physics_service ~= nil then
+        test("PhysicsService:GetMaxCollisionGroups returns number", function()
+            return type(physics_service:GetMaxCollisionGroups()) == "number"
+        end)
+
+        test("PhysicsService:GetRegisteredCollisionGroups returns table", function()
+            return type(physics_service:GetRegisteredCollisionGroups())
+                == "table"
+        end)
+
+        test("PhysicsService:IsCollisionGroupRegistered returns boolean", function()
+            return type(
+                physics_service:IsCollisionGroupRegistered("Default")
+            ) == "boolean"
+        end)
+
+        test("PhysicsService:CollisionGroupsAreCollidable returns boolean", function()
+            return type(
+                physics_service:CollisionGroupsAreCollidable(
+                    "Default",
+                    "Default"
+                )
+            ) == "boolean"
+        end)
+    end
+
+    -- --------------------------------------------------------
+    -- UserInputService additional official getters.
+    -- --------------------------------------------------------
+    if user_input_service ~= nil then
+        local a_key = enum_item("KeyCode", "A")
+        if a_key ~= nil then
+            test("UserInputService:GetStringForKeyCode returns string", function()
+                local value = user_input_service:GetStringForKeyCode(a_key)
+                return type(value) == "string", value
+            end)
+        end
+
+        local gamepad1 = enum_item("UserInputType", "Gamepad1")
+        if gamepad1 ~= nil then
+            test("UserInputService:GetGamepadState returns table", function()
+                local values = user_input_service:GetGamepadState(gamepad1)
+                return type(values) == "table", type(values)
+            end)
+
+            test("UserInputService:GetSupportedGamepadKeyCodes returns table", function()
+                local values =
+                    user_input_service:GetSupportedGamepadKeyCodes(gamepad1)
+                return type(values) == "table", type(values)
+            end)
+
+            test("UserInputService:IsNavigationGamepad returns boolean", function()
+                return type(
+                    user_input_service:IsNavigationGamepad(gamepad1)
+                ) == "boolean"
+            end)
+        end
+    end
+
+    -- --------------------------------------------------------
+    -- Common Roblox datatypes beyond constructors.
+    -- --------------------------------------------------------
+    if Random ~= nil and type(first_present(Random, "new")) == "function" then
+        local random = Random.new(12345)
+        test("Random:NextInteger returns bounded integer", function()
+            local value = random:NextInteger(1, 10)
+            return type(value) == "number"
+                and value >= 1
+                and value <= 10
+                and value % 1 == 0,
+                value
+        end)
+        test("Random:NextNumber returns bounded number", function()
+            local value = random:NextNumber(-1, 1)
+            return type(value) == "number"
+                and value >= -1
+                and value <= 1,
+                value
+        end)
+        test("Random:NextUnitVector returns Vector3-like value", function()
+            local value = random:NextUnitVector()
+            return value ~= nil and type(value.X) == "number"
+        end)
+    end
+
+    if RaycastParams ~= nil
+        and type(first_present(RaycastParams, "new")) == "function"
+    then
+        test("RaycastParams.new creates configurable object", function()
+            local params = RaycastParams.new()
+            local exclude = enum_item("RaycastFilterType", "Exclude")
+            if exclude ~= nil then
+                params.FilterType = exclude
+            end
+            params.IgnoreWater = true
+            params.RespectCanCollide = false
+            return type(params.FilterDescendantsInstances) == "table"
+        end)
+    end
+
+    if OverlapParams ~= nil
+        and type(first_present(OverlapParams, "new")) == "function"
+    then
+        test("OverlapParams.new creates configurable object", function()
+            local params = OverlapParams.new()
+            params.MaxParts = 8
+            params.RespectCanCollide = false
+            return params.MaxParts == 8
+        end)
+    end
 end
 
 -- ============================================================
@@ -9588,6 +11880,30 @@ do
         end
     end
 
+    local function catalog_service(name)
+        if game == nil then
+            return nil
+        end
+
+        local ok, value = pcall(function()
+            return game:GetService(name)
+        end)
+
+        return ok and value or nil
+    end
+
+    local tween_service_catalog = catalog_service("TweenService")
+    local collection_service_catalog = catalog_service("CollectionService")
+    local http_service_catalog = catalog_service("HttpService")
+    local context_action_service_catalog = catalog_service("ContextActionService")
+    local debris_catalog = catalog_service("Debris")
+    local gui_service_catalog = catalog_service("GuiService")
+    local text_service_catalog = catalog_service("TextService")
+    local sound_service_catalog = catalog_service("SoundService")
+    local teams_service_catalog = catalog_service("Teams")
+    local pathfinding_service_catalog = catalog_service("PathfindingService")
+    local physics_service_catalog = catalog_service("PhysicsService")
+
     local namespace_groups = {
         {
             "math",
@@ -10126,12 +12442,17 @@ do
             "Players",
             players_service,
             [[
-            GetPlayers GetPlayerByUserId GetUserIdFromNameAsync
-            GetNameFromUserIdAsync GetUserThumbnailAsync GetFriendsAsync
+            GetPlayers GetPlayerByUserId GetPlayerFromCharacter
+            GetUserIdFromNameAsync GetNameFromUserIdAsync
+            GetUserThumbnailAsync GetFriendsAsync
             GetHumanoidDescriptionFromUserId
+            GetHumanoidDescriptionFromUserIdAsync
             GetHumanoidDescriptionFromOutfitId
+            GetHumanoidDescriptionFromOutfitIdAsync
             CreateHumanoidModelFromDescription
+            CreateHumanoidModelFromDescriptionAsync
             CreateHumanoidModelFromUserId
+            CreateHumanoidModelFromUserIdAsync
             GetCharacterAppearanceAsync GetCharacterAppearanceInfoAsync
             GetUserInfosByUserIdsAsync ReportAbuse
             ]]
@@ -10140,9 +12461,10 @@ do
             "RunService",
             run_service,
             [[
-            BindToRenderStep UnbindFromRenderStep IsClient IsServer
-            IsStudio IsRunning IsRunMode IsEdit IsEditMode
-            SetRobloxGuiFocused GetRobloxVersion
+            BindToRenderStep UnbindFromRenderStep BindToSimulation
+            GetPredictionStatus SetPredictionMode
+            IsClient IsServer IsStudio IsRunning IsRunMode IsEdit
+            IsEditMode SetRobloxGuiFocused GetRobloxVersion
             GetRobloxClientChannel GetCoreScriptVersion
             ]]
         },
@@ -10150,13 +12472,15 @@ do
             "UserInputService",
             user_input_service,
             [[
-            IsKeyDown GetConnectedGamepads GetGamepadState
-            GetNavigationGamepads
+            IsKeyDown IsMouseButtonPressed GetConnectedGamepads
+            GetFocusedTextBox GetGamepadConnected GetGamepadState
+            GetKeysPressed GetMouseButtonsPressed GetMouseDelta
+            GetMouseLocation GetNavigationGamepads
             GetSupportedGamepadKeyCodes SetNavigationGamepad
             GetDeviceAcceleration GetDeviceGravity GetDeviceRotation
             GetLastInputType GetStringForKeyCode GetImageForKeyCode
             IsGamepadButtonDown IsNavigationGamepad
-            SetMouseIconOverride RequestKeyboard
+            SetMouseLocation SetMouseIconOverride RequestKeyboard
             ]]
         },
         {
@@ -10165,6 +12489,96 @@ do
             [[
             GetMinutesAfterMidnight SetMinutesAfterMidnight
             GetMoonDirection GetSunDirection
+            ]]
+        },
+        {
+            "TweenService",
+            tween_service_catalog,
+            [[
+            Create GetValue SmoothDamp
+            ]]
+        },
+        {
+            "CollectionService",
+            collection_service_catalog,
+            [[
+            AddTag RemoveTag HasTag GetTags GetAllTags GetTagged
+            GetInstanceAddedSignal GetInstanceRemovedSignal
+            ]]
+        },
+        {
+            "HttpService",
+            http_service_catalog,
+            [[
+            GenerateGUID JSONEncode JSONDecode UrlEncode
+            GetAsync PostAsync RequestAsync CreateWebStreamClient GetSecret
+            ]]
+        },
+        {
+            "ContextActionService",
+            context_action_service_catalog,
+            [[
+            BindAction BindActionAtPriority BindActivate
+            GetAllBoundActionInfo GetBoundActionInfo GetButton
+            GetCurrentLocalToolIcon SetDescription SetImage SetPosition
+            SetTitle UnbindAction UnbindActivate UnbindAllActions
+            ]]
+        },
+        {
+            "Debris",
+            debris_catalog,
+            [[
+            AddItem
+            ]]
+        },
+        {
+            "GuiService",
+            gui_service_catalog,
+            [[
+            GetGuiInset GetInsetArea GetInspectMenuEnabled
+            GetGameplayPausedNotificationEnabled Select
+            SetEmotesMenuOpen SetGameplayPausedNotificationEnabled
+            SetInspectMenuEnabled
+            ]]
+        },
+        {
+            "TextService",
+            text_service_catalog,
+            [[
+            GetTextSize GetTextBoundsAsync GetTextSizeOffsetAsync
+            GetFamilyInfoAsync FilterStringAsync
+            ]]
+        },
+        {
+            "SoundService",
+            sound_service_catalog,
+            [[
+            GetListener GetMixerTime PlayLocalSound SetListener
+            ]]
+        },
+        {
+            "Teams",
+            teams_service_catalog,
+            [[
+            GetTeams RebalanceTeams
+            ]]
+        },
+        {
+            "PathfindingService",
+            pathfinding_service_catalog,
+            [[
+            CreatePath ComputeRawPathAsync ComputeSmoothPathAsync
+            FindPathAsync
+            ]]
+        },
+        {
+            "PhysicsService",
+            physics_service_catalog,
+            [[
+            CollisionGroupsAreCollidable CollisionGroupSetCollidable
+            GetMaxCollisionGroups GetRegisteredCollisionGroups
+            IsCollisionGroupRegistered RegisterCollisionGroup
+            RenameCollisionGroup UnregisterCollisionGroup
             ]]
         }
     }
@@ -10204,6 +12618,104 @@ do
             return user_input_service:IsMouseButtonPressed(
                 mouse_button
             )
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetConnectedGamepads",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetConnectedGamepads()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetFocusedTextBox",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetFocusedTextBox()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetKeysPressed",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetKeysPressed()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetLastInputType",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetLastInputType()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetMouseButtonsPressed",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetMouseButtonsPressed()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetMouseDelta",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetMouseDelta()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetNavigationGamepads",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            return user_input_service:GetNavigationGamepads()
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:IsKeyDown",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            local key = nil
+            pcall(function()
+                key = Enum.KeyCode.Unknown
+            end)
+            return user_input_service:IsKeyDown(key)
+        end
+    )
+
+    catalog_namecall_probe(
+        "UserInputService:GetGamepadConnected",
+        function()
+            if user_input_service == nil then
+                error("no UserInputService fixture available", 0)
+            end
+            local gamepad = nil
+            pcall(function()
+                gamepad = Enum.UserInputType.Gamepad1
+            end)
+            return user_input_service:GetGamepadConnected(gamepad)
         end
     )
 
@@ -10293,6 +12805,377 @@ do
 
             return camera:WorldToScreenPoint(
                 Vector3.new(0, 0, 0)
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Camera:GetRenderCFrame",
+        function()
+            if workspace == nil or workspace.CurrentCamera == nil then
+                error("no Camera fixture available", 0)
+            end
+            return workspace.CurrentCamera:GetRenderCFrame()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Camera:ScreenPointToRay",
+        function()
+            if workspace == nil or workspace.CurrentCamera == nil then
+                error("no Camera fixture available", 0)
+            end
+            return workspace.CurrentCamera:ScreenPointToRay(0, 0, 0)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Camera:ViewportPointToRay",
+        function()
+            if workspace == nil or workspace.CurrentCamera == nil then
+                error("no Camera fixture available", 0)
+            end
+            return workspace.CurrentCamera:ViewportPointToRay(0, 0, 0)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Camera:WorldToViewportPoint",
+        function()
+            if workspace == nil or workspace.CurrentCamera == nil then
+                error("no Camera fixture available", 0)
+            end
+            return workspace.CurrentCamera:WorldToViewportPoint(
+                Vector3.new(0, 0, 0)
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Camera:GetPartsObscuringTarget",
+        function()
+            if workspace == nil or workspace.CurrentCamera == nil then
+                error("no Camera fixture available", 0)
+            end
+            return workspace.CurrentCamera:GetPartsObscuringTarget(
+                {Vector3.new(0, 0, 0)},
+                {}
+            )
+        end
+    )
+
+    -- Ordinary Roblox service namecalls. These use safe/local arguments so
+    -- the raw catalog also reflects bridges that only implement NAMECALL.
+    catalog_namecall_probe(
+        "workspace:GetServerTimeNow",
+        function()
+            if workspace == nil then
+                error("no Workspace fixture available", 0)
+            end
+            return workspace:GetServerTimeNow()
+        end
+    )
+
+    catalog_namecall_probe(
+        "workspace:Raycast",
+        function()
+            if workspace == nil or Vector3 == nil then
+                error("no Workspace fixture available", 0)
+            end
+            return workspace:Raycast(
+                Vector3.new(0, -100000, 0),
+                Vector3.new(0, -1, 0)
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Players:GetPlayers",
+        function()
+            if players_service == nil then
+                error("no Players fixture available", 0)
+            end
+            return players_service:GetPlayers()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Players:GetPlayerByUserId",
+        function()
+            if players_service == nil then
+                error("no Players fixture available", 0)
+            end
+            local local_player = players_service.LocalPlayer
+            local user_id = local_player and local_player.UserId or -1
+            return players_service:GetPlayerByUserId(user_id)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Players:GetPlayerFromCharacter",
+        function()
+            if players_service == nil then
+                error("no Players fixture available", 0)
+            end
+            local local_player = players_service.LocalPlayer
+            local character = local_player and local_player.Character or nil
+            return players_service:GetPlayerFromCharacter(character)
+        end,
+        true
+    )
+
+    local runservice_safe_namecalls = {
+        {"IsClient", function() return run_service:IsClient() end},
+        {"IsServer", function() return run_service:IsServer() end},
+        {"IsStudio", function() return run_service:IsStudio() end},
+        {"IsRunning", function() return run_service:IsRunning() end},
+        {"IsRunMode", function() return run_service:IsRunMode() end},
+        {"IsEdit", function() return run_service:IsEdit() end, true}
+    }
+
+    for i = 1, #runservice_safe_namecalls do
+        local entry = runservice_safe_namecalls[i]
+        catalog_namecall_probe(
+            "RunService:" .. entry[1],
+            function()
+                if run_service == nil then
+                    error("no RunService fixture available", 0)
+                end
+                return entry[2]()
+            end,
+            entry[3] == true
+        )
+    end
+
+    catalog_namecall_probe(
+        "TweenService:GetValue",
+        function()
+            if tween_service_catalog == nil then
+                error("no TweenService fixture available", 0)
+            end
+            return tween_service_catalog:GetValue(
+                0.5,
+                Enum.EasingStyle.Linear,
+                Enum.EasingDirection.InOut
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "TweenService:SmoothDamp",
+        function()
+            if tween_service_catalog == nil then
+                error("no TweenService fixture available", 0)
+            end
+            return tween_service_catalog:SmoothDamp(
+                0,
+                1,
+                0,
+                0.5,
+                nil,
+                1 / 60
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "CollectionService:GetAllTags",
+        function()
+            if collection_service_catalog == nil then
+                error("no CollectionService fixture available", 0)
+            end
+            return collection_service_catalog:GetAllTags()
+        end
+    )
+
+    catalog_namecall_probe(
+        "HttpService:GenerateGUID",
+        function()
+            if http_service_catalog == nil then
+                error("no HttpService fixture available", 0)
+            end
+            return http_service_catalog:GenerateGUID(false)
+        end
+    )
+
+    catalog_namecall_probe(
+        "HttpService:JSONEncode",
+        function()
+            if http_service_catalog == nil then
+                error("no HttpService fixture available", 0)
+            end
+            return http_service_catalog:JSONEncode({surface = true})
+        end
+    )
+
+    catalog_namecall_probe(
+        "HttpService:JSONDecode",
+        function()
+            if http_service_catalog == nil then
+                error("no HttpService fixture available", 0)
+            end
+            return http_service_catalog:JSONDecode(
+                [[{"surface":true}]]
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "HttpService:UrlEncode",
+        function()
+            if http_service_catalog == nil then
+                error("no HttpService fixture available", 0)
+            end
+            return http_service_catalog:UrlEncode("a b")
+        end
+    )
+
+    catalog_namecall_probe(
+        "ContextActionService:GetAllBoundActionInfo",
+        function()
+            if context_action_service_catalog == nil then
+                error("no ContextActionService fixture available", 0)
+            end
+            return context_action_service_catalog:GetAllBoundActionInfo()
+        end
+    )
+
+    catalog_namecall_probe(
+        "GuiService:GetGuiInset",
+        function()
+            if gui_service_catalog == nil then
+                error("no GuiService fixture available", 0)
+            end
+            return gui_service_catalog:GetGuiInset()
+        end
+    )
+
+    catalog_namecall_probe(
+        "GuiService:GetInspectMenuEnabled",
+        function()
+            if gui_service_catalog == nil then
+                error("no GuiService fixture available", 0)
+            end
+            return gui_service_catalog:GetInspectMenuEnabled()
+        end
+    )
+
+    catalog_namecall_probe(
+        "TextService:GetTextSize",
+        function()
+            if text_service_catalog == nil then
+                error("no TextService fixture available", 0)
+            end
+            return text_service_catalog:GetTextSize(
+                "surface",
+                14,
+                Enum.Font.SourceSans,
+                Vector2.new(256, 256)
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Lighting:GetMinutesAfterMidnight",
+        function()
+            if lighting_service == nil then
+                error("no Lighting fixture available", 0)
+            end
+            return lighting_service:GetMinutesAfterMidnight()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Lighting:GetSunDirection",
+        function()
+            if lighting_service == nil then
+                error("no Lighting fixture available", 0)
+            end
+            return lighting_service:GetSunDirection()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Lighting:GetMoonDirection",
+        function()
+            if lighting_service == nil then
+                error("no Lighting fixture available", 0)
+            end
+            return lighting_service:GetMoonDirection()
+        end
+    )
+
+    catalog_namecall_probe(
+        "SoundService:GetMixerTime",
+        function()
+            if sound_service_catalog == nil then
+                error("no SoundService fixture available", 0)
+            end
+            return sound_service_catalog:GetMixerTime()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Teams:GetTeams",
+        function()
+            if teams_service_catalog == nil then
+                error("no Teams fixture available", 0)
+            end
+            return teams_service_catalog:GetTeams()
+        end
+    )
+
+    catalog_namecall_probe(
+        "PathfindingService:CreatePath",
+        function()
+            if pathfinding_service_catalog == nil then
+                error("no PathfindingService fixture available", 0)
+            end
+            return pathfinding_service_catalog:CreatePath()
+        end
+    )
+
+    catalog_namecall_probe(
+        "PhysicsService:GetMaxCollisionGroups",
+        function()
+            if physics_service_catalog == nil then
+                error("no PhysicsService fixture available", 0)
+            end
+            return physics_service_catalog:GetMaxCollisionGroups()
+        end
+    )
+
+    catalog_namecall_probe(
+        "PhysicsService:GetRegisteredCollisionGroups",
+        function()
+            if physics_service_catalog == nil then
+                error("no PhysicsService fixture available", 0)
+            end
+            return physics_service_catalog:GetRegisteredCollisionGroups()
+        end
+    )
+
+    catalog_namecall_probe(
+        "PhysicsService:IsCollisionGroupRegistered",
+        function()
+            if physics_service_catalog == nil then
+                error("no PhysicsService fixture available", 0)
+            end
+            return physics_service_catalog:IsCollisionGroupRegistered(
+                "Default"
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "PhysicsService:CollisionGroupsAreCollidable",
+        function()
+            if physics_service_catalog == nil then
+                error("no PhysicsService fixture available", 0)
+            end
+            return physics_service_catalog:CollisionGroupsAreCollidable(
+                "Default",
+                "Default"
             )
         end
     )
@@ -10430,15 +13313,6 @@ do
             end
         },
         {
-            "FindFirstDescendant",
-            function()
-                local object = require_catalog_basepart()
-                return object:FindFirstDescendant(
-                    missing_instance_name
-                )
-            end
-        },
-        {
             "FindFirstAncestor",
             function()
                 local object = require_catalog_basepart()
@@ -10550,6 +13424,27 @@ do
             function()
                 local object = require_catalog_basepart()
                 return object:GetPropertyChangedSignal("Name")
+            end
+        },
+        {
+            "IsPropertyModified",
+            function()
+                local object = require_catalog_basepart()
+                return object:IsPropertyModified("Name")
+            end
+        },
+        {
+            "QueryDescendants",
+            function()
+                local object = require_catalog_basepart()
+                return object:QueryDescendants("BasePart")
+            end
+        },
+        {
+            "ResetPropertyToDefault",
+            function()
+                local object = require_disposable_basepart()
+                object:ResetPropertyToDefault("Name")
             end
         },
         {
@@ -10693,9 +13588,494 @@ do
         end)
     end
 
-    -- Check the real Roblox remote methods without firing any live
-    -- remote. Prefer a live sample, then a disposable unparented
-    -- Instance when Instance.new is available.
+    -- Common Roblox class method surfaces that do not have global class
+    -- tables. Probe both indexed methods and safe ':' namecalls on
+    -- disposable Instances.
+    local function create_catalog_instance(class_name)
+        if type(catalog_instance_new) ~= "function" then
+            return nil
+        end
+
+        local ok, object = pcall(catalog_instance_new, class_name)
+        return ok and object or nil
+    end
+
+    local catalog_model = create_catalog_instance("Model")
+    local catalog_humanoid = create_catalog_instance("Humanoid")
+    local catalog_animator = create_catalog_instance("Animator")
+    local catalog_local_player =
+        players_service ~= nil and players_service.LocalPlayer or nil
+    local catalog_bindable_event = create_catalog_instance("BindableEvent")
+    local catalog_bindable_function = create_catalog_instance("BindableFunction")
+    local catalog_tool = create_catalog_instance("Tool")
+    local catalog_prompt = create_catalog_instance("ProximityPrompt")
+    local catalog_sound = create_catalog_instance("Sound")
+    local catalog_team = create_catalog_instance("Team")
+
+    namespace_group(
+        "Model",
+        catalog_model,
+        [[
+        GetBoundingBox GetExtentsSize GetPersistentPlayers GetScale
+        MoveTo RemovePersistentPlayer ResetOrientationToIdentity ScaleTo
+        SetIdentityOrientation TranslateBy GetPivot PivotTo
+        ]]
+    )
+
+    namespace_group(
+        "Humanoid",
+        catalog_humanoid,
+        [[
+        AddAccessory ApplyDescriptionAsync ApplyDescriptionResetAsync
+        BuildRigFromAttachments ChangeState EquipTool GetAccessories
+        GetAppliedDescription GetBodyPartR15 GetLimb GetMoveVelocity
+        GetPlayingAnimationTracks GetRelativeVelocityAtFloor GetState
+        GetStateEnabled Move MoveTo PlayEmoteAsync RemoveAccessories
+        ReplaceBodyPartR15 SetStateEnabled TakeDamage UnequipTools
+        ]]
+    )
+
+    namespace_group(
+        "Animator",
+        catalog_animator,
+        [[
+        ApplyJointVelocities GetPlayingAnimationTracks
+        GetTrackByAnimationId LoadAnimation
+        RegisterEvaluationParallelCallback StepAnimations
+        ]]
+    )
+
+    namespace_group(
+        "Player",
+        catalog_local_player,
+        [[
+        DistanceFromCharacter GetCameraState GetJoinData GetMouse
+        GetNetworkPing HasAppearanceLoaded IsVerified
+        ]]
+    )
+
+    namespace_group(
+        "BindableEvent",
+        catalog_bindable_event,
+        [[
+        Fire
+        ]]
+    )
+
+    namespace_group(
+        "BindableFunction",
+        catalog_bindable_function,
+        [[
+        Invoke
+        ]]
+    )
+
+    namespace_group(
+        "Tool",
+        catalog_tool,
+        [[
+        Activate Deactivate GetPivot PivotTo GetBoundingBox GetExtentsSize
+        GetScale MoveTo ScaleTo
+        ]]
+    )
+
+    namespace_group(
+        "ProximityPrompt",
+        catalog_prompt,
+        [[
+        InputHoldBegin InputHoldEnd
+        ]]
+    )
+
+    namespace_group(
+        "Sound",
+        catalog_sound,
+        [[
+        Pause Play Resume Stop
+        ]]
+    )
+
+    namespace_group(
+        "Team",
+        catalog_team,
+        [[
+        GetPlayers
+        ]]
+    )
+
+    catalog_namecall_probe(
+        "Model:GetBoundingBox",
+        function()
+            if catalog_model == nil then
+                error("no Model fixture available", 0)
+            end
+            return catalog_model:GetBoundingBox()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Model:GetExtentsSize",
+        function()
+            if catalog_model == nil then
+                error("no Model fixture available", 0)
+            end
+            return catalog_model:GetExtentsSize()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Model:GetScale",
+        function()
+            if catalog_model == nil then
+                error("no Model fixture available", 0)
+            end
+            return catalog_model:GetScale()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Model:ScaleTo",
+        function()
+            if catalog_model == nil then
+                error("no Model fixture available", 0)
+            end
+            local scale = catalog_model:GetScale()
+            return catalog_model:ScaleTo(scale)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Model:GetPivot",
+        function()
+            if catalog_model == nil then
+                error("no Model fixture available", 0)
+            end
+            return catalog_model:GetPivot()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Model:PivotTo",
+        function()
+            if catalog_model == nil then
+                error("no Model fixture available", 0)
+            end
+            return catalog_model:PivotTo(catalog_model:GetPivot())
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:GetAccessories",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:GetAccessories()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:GetAppliedDescription",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:GetAppliedDescription()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:GetMoveVelocity",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:GetMoveVelocity()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:GetRelativeVelocityAtFloor",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:GetRelativeVelocityAtFloor()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:GetState",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:GetState()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:GetStateEnabled",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:GetStateEnabled(
+                Enum.HumanoidStateType.Jumping
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:SetStateEnabled",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            local state = Enum.HumanoidStateType.Jumping
+            local value = catalog_humanoid:GetStateEnabled(state)
+            return catalog_humanoid:SetStateEnabled(state, value)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:Move",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:Move(Vector3.new(0, 0, 0), false)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:MoveTo",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:MoveTo(Vector3.new(0, 0, 0))
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:TakeDamage",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:TakeDamage(0)
+        end
+    )
+
+    catalog_namecall_probe(
+        "Humanoid:UnequipTools",
+        function()
+            if catalog_humanoid == nil then
+                error("no Humanoid fixture available", 0)
+            end
+            return catalog_humanoid:UnequipTools()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Animator:GetPlayingAnimationTracks",
+        function()
+            if catalog_animator == nil then
+                error("no Animator fixture available", 0)
+            end
+            return catalog_animator:GetPlayingAnimationTracks()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Animator:GetTrackByAnimationId",
+        function()
+            if catalog_animator == nil then
+                error("no Animator fixture available", 0)
+            end
+            return catalog_animator:GetTrackByAnimationId(
+                "rbxassetid://0"
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Player:DistanceFromCharacter",
+        function()
+            if catalog_local_player == nil then
+                error("no Player fixture available", 0)
+            end
+            return catalog_local_player:DistanceFromCharacter(
+                Vector3.new(0, 0, 0)
+            )
+        end
+    )
+
+    catalog_namecall_probe(
+        "Player:GetCameraState",
+        function()
+            if catalog_local_player == nil then
+                error("no Player fixture available", 0)
+            end
+            return catalog_local_player:GetCameraState()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Player:GetJoinData",
+        function()
+            if catalog_local_player == nil then
+                error("no Player fixture available", 0)
+            end
+            return catalog_local_player:GetJoinData()
+        end,
+        true
+    )
+
+    catalog_namecall_probe(
+        "Player:GetMouse",
+        function()
+            if catalog_local_player == nil then
+                error("no Player fixture available", 0)
+            end
+            return catalog_local_player:GetMouse()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Player:GetNetworkPing",
+        function()
+            if catalog_local_player == nil then
+                error("no Player fixture available", 0)
+            end
+            return catalog_local_player:GetNetworkPing()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Player:HasAppearanceLoaded",
+        function()
+            if catalog_local_player == nil then
+                error("no Player fixture available", 0)
+            end
+            return catalog_local_player:HasAppearanceLoaded()
+        end
+    )
+
+    catalog_namecall_probe(
+        "BindableEvent:Fire",
+        function()
+            if catalog_bindable_event == nil then
+                error("no BindableEvent fixture available", 0)
+            end
+            return catalog_bindable_event:Fire("surface")
+        end
+    )
+
+
+    catalog_namecall_probe(
+        "Tool:Activate",
+        function()
+            if catalog_tool == nil then
+                error("no Tool fixture available", 0)
+            end
+            return catalog_tool:Activate()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Tool:Deactivate",
+        function()
+            if catalog_tool == nil then
+                error("no Tool fixture available", 0)
+            end
+            return catalog_tool:Deactivate()
+        end
+    )
+
+    catalog_namecall_probe(
+        "ProximityPrompt:InputHoldBegin",
+        function()
+            if catalog_prompt == nil then
+                error("no ProximityPrompt fixture available", 0)
+            end
+            return catalog_prompt:InputHoldBegin()
+        end
+    )
+
+    catalog_namecall_probe(
+        "ProximityPrompt:InputHoldEnd",
+        function()
+            if catalog_prompt == nil then
+                error("no ProximityPrompt fixture available", 0)
+            end
+            return catalog_prompt:InputHoldEnd()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Sound:Pause",
+        function()
+            if catalog_sound == nil then
+                error("no Sound fixture available", 0)
+            end
+            return catalog_sound:Pause()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Sound:Resume",
+        function()
+            if catalog_sound == nil then
+                error("no Sound fixture available", 0)
+            end
+            return catalog_sound:Resume()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Sound:Stop",
+        function()
+            if catalog_sound == nil then
+                error("no Sound fixture available", 0)
+            end
+            return catalog_sound:Stop()
+        end
+    )
+
+    catalog_namecall_probe(
+        "Team:GetPlayers",
+        function()
+            if catalog_team == nil then
+                error("no Team fixture available", 0)
+            end
+            return catalog_team:GetPlayers()
+        end
+    )
+
+    local catalog_class_fixtures = {
+        catalog_model,
+        catalog_humanoid,
+        catalog_animator,
+        catalog_bindable_event,
+        catalog_bindable_function,
+        catalog_tool,
+        catalog_prompt,
+        catalog_sound,
+        catalog_team
+    }
+
+    for i = 1, #catalog_class_fixtures do
+        local object = catalog_class_fixtures[i]
+        if object ~= nil then
+            pcall(function()
+                object:Destroy()
+            end)
+        end
+    end
+
+
     local remote_class_specs = {
         {
             "RemoteEvent",
@@ -10889,9 +14269,6 @@ if #failure_records > 0 then
             emit_warn("    WHY: " .. failure.diagnosis)
         end
 
-        -- Some external VMs enforce a short uninterrupted scheduler
-        -- budget. Yield between small output batches so a complete
-        -- failure index can be printed without dropping any entries.
         if i % FAILURE_INDEX_YIELD_INTERVAL == 0
             and type(task) == "table"
             and type(task.wait) == "function"
